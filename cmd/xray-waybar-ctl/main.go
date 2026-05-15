@@ -52,6 +52,7 @@ Servers:
 
 Waybar:
   status            Emit one line of JSON describing the current state
+  menu              Open a walker dmenu picker of cached servers; selection → use
 
 Misc:
   version           Print version
@@ -76,6 +77,8 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "status":
 		return cmdStatus(ctx)
+	case "menu":
+		return cmdMenu(ctx)
 	case "connect":
 		return cmdConnect(ctx)
 	case "disconnect":

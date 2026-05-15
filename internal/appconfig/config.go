@@ -37,6 +37,11 @@ type Config struct {
 	LogFile   string `yaml:"log_file"`
 	CacheFile string `yaml:"cache_file"`
 	StateFile string `yaml:"state_file"`
+
+	// SystemWide enables the TUN sidecar (hev-socks5-tunnel via the
+	// xray-waybar-tun.service systemd unit). When true, `connect` will
+	// start the unit after xray comes up; `disconnect` will stop it.
+	SystemWide bool `yaml:"system_wide"`
 }
 
 // TestTimeout returns TestTimeoutMS as a duration.

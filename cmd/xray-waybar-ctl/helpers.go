@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/yourgfslove/xray-waybar-ctl/internal/appconfig"
@@ -12,8 +14,15 @@ import (
 	"github.com/yourgfslove/xray-waybar-ctl/internal/server"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/store"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/subscription"
+	"github.com/yourgfslove/xray-waybar-ctl/internal/sysmode"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/xrayconfig"
 )
+
+// bypassFile is read by xray-waybar-tun.service ExecStartPost. Each
+// line is one IPv4 address that must NOT be routed through tun0 —
+// otherwise xray's own connection to the upstream server gets
+// looped back through the tunnel.
+const bypassFile = "/tmp/xray-waybar-bypass.txt"
 
 // loadCtx is the bundle every command needs. It is reloaded per
 // invocation — the CLI is short-lived.
@@ -117,6 +126,17 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 		return err
 	}
 
+	if lc.cfg.SystemWide {
+		if err := writeServerBypass(ctx, s); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: bypass IP write: %v\n", err)
+		}
+		if err := sysmode.Start(ctx); err != nil {
+			// xray is already up — print the warning but don't undo it.
+			// The user can rerun `connect` after fixing the unit.
+			fmt.Fprintf(os.Stderr, "warn: system_wide tunnel did not start: %v\n", err)
+		}
+	}
+
 	now := time.Now()
 	lc.state.Active = &s
 	lc.state.ConnectedAt = now
@@ -174,3 +194,100 @@ func activeIndex(lc *loadCtx) int {
 
 // errNoServers is returned when no servers are cached.
 var errNoServers = errors.New("no servers in cache; run `xray-waybar-ctl update` first")
+
+// writeServerBypass resolves the upstream xray server to its IPv4
+// address(es) and writes them to bypassFile alongside well-known DNS
+// servers and any nameservers from /etc/resolv.conf.
+//
+// The TUN systemd unit reads this file on ExecStartPost and adds
+// host-routes so xray's own connection (and DNS) bypasses tun0.
+// Without this:
+//   - every packet xray emits gets looped back through the tunnel;
+//   - DNS-over-UDP doesn't survive REALITY (TCP-only), sites hang.
+func writeServerBypass(ctx context.Context, s server.Server) error {
+	ips, err := resolveServerIPs(ctx, s.Address)
+	if err != nil {
+		return err
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("no IPv4 addresses for %q", s.Address)
+	}
+	// dedup + DNS additions
+	seen := map[string]struct{}{}
+	add := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		v4 := ip.To4()
+		if v4 == nil {
+			return
+		}
+		seen[v4.String()] = struct{}{}
+	}
+	for _, ip := range ips {
+		add(ip)
+	}
+	// well-known public DNS — these don't reveal much (you'd query
+	// them either way) but their reachability lets browsers resolve
+	// hostnames while the rest of traffic goes through xray.
+	for _, s := range []string{"1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"} {
+		add(net.ParseIP(s))
+	}
+	for _, ip := range readResolvConfNameservers() {
+		add(ip)
+	}
+
+	var b strings.Builder
+	for ip := range seen {
+		b.WriteString(ip)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(bypassFile, []byte(b.String()), 0o644)
+}
+
+// readResolvConfNameservers parses /etc/resolv.conf for `nameserver`
+// lines. Best-effort — errors are swallowed because the well-known
+// DNS entries provide a safe fallback.
+func readResolvConfNameservers() []net.IP {
+	raw, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return nil
+	}
+	var out []net.IP
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "nameserver") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ip := net.ParseIP(fields[1])
+		if ip != nil && ip.To4() != nil {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+func resolveServerIPs(ctx context.Context, host string) ([]net.IP, error) {
+	// If host is already an IP, skip DNS.
+	if ip := net.ParseIP(host); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return []net.IP{v4}, nil
+		}
+		return []net.IP{ip}, nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", host, err)
+	}
+	var out []net.IP
+	for _, a := range addrs {
+		if v4 := a.IP.To4(); v4 != nil {
+			out = append(out, v4)
+		}
+	}
+	return out, nil
+}

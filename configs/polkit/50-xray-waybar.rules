@@ -1,0 +1,22 @@
+// Allow members of `wheel` to start/stop xray-waybar-tun.service without
+// a password prompt. This is what lets `xray-waybar-ctl connect` invoke
+// systemctl from the user session.
+//
+// Scope is intentionally tight: only this one unit, only these actions.
+
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return;
+    }
+    var unit = action.lookup("unit");
+    if (unit !== "xray-waybar-tun.service") {
+        return;
+    }
+    var verb = action.lookup("verb");
+    if (verb !== "start" && verb !== "stop" && verb !== "restart") {
+        return;
+    }
+    if (subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});

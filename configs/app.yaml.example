@@ -24,3 +24,9 @@ pid_file: "/tmp/xray-waybar.pid"
 log_file: "~/.local/share/xray-waybar/xray.log"
 cache_file: "~/.cache/xray-waybar/servers.json"
 state_file: "~/.cache/xray-waybar/state.json"
+
+# System-wide режим: весь IP-трафик заворачивается в xray через TUN
+# (hev-socks5-tunnel). Требует установленного systemd unit:
+#   sudo make install-system
+# Bypass для 10/8, 172.16/12, 192.168/16 встроен в unit.
+system_wide: false

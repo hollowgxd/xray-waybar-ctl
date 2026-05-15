@@ -4,14 +4,22 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/yourgfslove/xray-waybar-ctl/internal/process"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/store"
+	"github.com/yourgfslove/xray-waybar-ctl/internal/sysmode"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/tester"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/waybar"
 )
+
+// menuSep separates fields in the dmenu line. Three U+2002 EN-SPACE
+// characters render as a wide gap that is visually obvious yet still
+// safe to split on (none of the server names ship with U+2002).
+const menuSep = "   "
 
 // cmdStatus emits one line of JSON for waybar. It must be fast — waybar
 // polls it on an interval — and must never fail with a non-zero exit
@@ -31,6 +39,12 @@ func cmdStatus(_ context.Context) error {
 	opt := waybar.ConnectedOptions{
 		LocalPort:   lc.cfg.XrayPort,
 		ConnectedAt: lc.state.ConnectedAt,
+		SystemWide:  lc.cfg.SystemWide,
+	}
+	if lc.cfg.SystemWide {
+		if state, _ := sysmode.Status(context.Background()); state == sysmode.StateActive {
+			opt.TunActive = true
+		}
 	}
 	if r, ok := lc.state.Results[lc.state.Active.Name]; ok && r.Alive {
 		opt.Latency = r.Latency
@@ -55,6 +69,21 @@ func cmdConnect(ctx context.Context) error {
 	}
 	if len(lc.cache.Servers) == 0 {
 		return errNoServers
+	}
+
+	// If a previous session left the tunnel and xray running, tear
+	// them down before testing — otherwise the temp xray instances
+	// the tester spawns get their traffic looped back into tun0 and
+	// every server appears dead.
+	if lc.cfg.SystemWide {
+		if err := sysmode.Stop(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: stop tunnel before test: %v\n", err)
+		}
+	}
+	if running, _ := process.IsRunning(lc.cfg.PIDFile); running {
+		if err := process.Stop(lc.cfg.PIDFile, 3*time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: stop xray before test: %v\n", err)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "testing %d servers…\n", len(lc.cache.Servers))
@@ -87,10 +116,17 @@ func cmdConnect(ctx context.Context) error {
 	return launch(ctx, lc, picked.Server)
 }
 
-func cmdDisconnect(_ context.Context) error {
+func cmdDisconnect(ctx context.Context) error {
 	lc, err := loadAll()
 	if err != nil {
 		return err
+	}
+	// Stop the tunnel *before* killing xray so no packets get sent into
+	// a dead SOCKS5 backend.
+	if lc.cfg.SystemWide {
+		if err := sysmode.Stop(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: system_wide tunnel stop: %v\n", err)
+		}
 	}
 	if err := process.Stop(lc.cfg.PIDFile, 3*time.Second); err != nil {
 		return err
@@ -232,6 +268,75 @@ func cmdUseDir(ctx context.Context, step int) error {
 		idx = (idx + step + len(lc.cache.Servers)) % len(lc.cache.Servers)
 	}
 	return launch(ctx, lc, lc.cache.Servers[idx])
+}
+
+// cmdMenu opens a walker --dmenu picker of cached servers. The user
+// sees liveness markers and latencies; choosing an entry runs `use`.
+//
+// We don't kick off a fresh URL-test here on purpose — that takes
+// several seconds and the user clicked expecting an immediate picker.
+// Latency comes from the last `test`/`connect` batch via state.json.
+// If the user wants a fresh measurement, they can run `test` first
+// or scroll on the waybar pill to bisect manually.
+func cmdMenu(ctx context.Context) error {
+	lc, err := loadAll()
+	if err != nil {
+		return err
+	}
+	if err := ensureFreshCache(ctx, lc, false); err != nil {
+		return err
+	}
+	if len(lc.cache.Servers) == 0 {
+		return errNoServers
+	}
+
+	var lines strings.Builder
+	currentName := ""
+	if lc.state.Active != nil {
+		currentName = lc.state.Active.Name
+	}
+	for _, s := range lc.cache.Servers {
+		marker := "○" // untested
+		info := "—"
+		if r, ok := lc.state.Results[s.Name]; ok {
+			if r.Alive {
+				marker = "●"
+				info = fmt.Sprintf("%dms", r.Latency.Milliseconds())
+			} else {
+				marker = "✗"
+				info = "dead"
+			}
+		}
+		prefix := "  "
+		if s.Name == currentName {
+			prefix = "→ "
+		}
+		fmt.Fprintf(&lines, "%s%s%s%s%s%s\n", prefix, marker, menuSep, s.Name, menuSep, info)
+	}
+
+	args := []string{"--dmenu", "--placeholder", "Pick a server"}
+	if currentName != "" {
+		args = append(args, "--current", currentName)
+	}
+	cmd := exec.CommandContext(ctx, "walker", args...)
+	cmd.Stdin = strings.NewReader(lines.String())
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		// non-zero exit usually means the user pressed Esc — that is
+		// not an error worth surfacing.
+		return nil
+	}
+	choice := strings.TrimSpace(string(out))
+	if choice == "" {
+		return nil
+	}
+	parts := strings.Split(choice, menuSep)
+	if len(parts) < 2 {
+		return fmt.Errorf("unparseable menu selection %q", choice)
+	}
+	name := strings.TrimSpace(parts[1])
+	return cmdUse(ctx, name)
 }
 
 func saveResults(lc *loadCtx, results []tester.Result) {

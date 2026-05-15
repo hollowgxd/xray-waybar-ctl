@@ -67,11 +67,17 @@ func Error(msg string) Status {
 // ConnectedOptions carries the tooltip-only data Connected needs to
 // render. All fields are optional — empty values are simply omitted.
 type ConnectedOptions struct {
-	Latency      time.Duration
-	UploadBytes  int64
-	DownBytes    int64
-	LocalPort    int
-	ConnectedAt  time.Time
+	Latency     time.Duration
+	UploadBytes int64
+	DownBytes   int64
+	LocalPort   int
+	ConnectedAt time.Time
+
+	// SystemWide is true when the tunnel sidecar is enabled in config.
+	// TunActive is true when sysmode.Status reports the unit active.
+	// (SystemWide && !TunActive) is the "running degraded" state.
+	SystemWide bool
+	TunActive  bool
 }
 
 // Connected renders the running state. The text is a short tag —
@@ -96,14 +102,27 @@ func Connected(s server.Server, opt ConnectedOptions) Status {
 	if opt.LocalPort > 0 {
 		fmt.Fprintf(&b, "\nSOCKS5: 127.0.0.1:%d", opt.LocalPort)
 	}
+	if opt.SystemWide {
+		if opt.TunActive {
+			b.WriteString("\nMode: system-wide (tun0)")
+		} else {
+			b.WriteString("\nMode: per-app — TUN inactive!")
+		}
+	} else {
+		b.WriteString("\nMode: per-app")
+	}
 	if !opt.ConnectedAt.IsZero() {
 		fmt.Fprintf(&b, "\nUptime: %s", roundDuration(time.Since(opt.ConnectedAt)))
 	}
 
+	class := "connected"
+	if opt.SystemWide && !opt.TunActive {
+		class = "degraded"
+	}
 	status := Status{
 		Text:    fmt.Sprintf("%s %s", IconConnected, shortName(s)),
 		Tooltip: b.String(),
-		Class:   "connected",
+		Class:   class,
 	}
 	if opt.Latency > 0 {
 		// Encode latency as a 0..100 "quality" percentage so themes

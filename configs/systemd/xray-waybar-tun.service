@@ -1,0 +1,72 @@
+[Unit]
+Description=xray-waybar TUN tunnel (tun2socks → xray)
+Documentation=https://github.com/xjasonlyu/tun2socks
+# Запускается только по команде — xray-waybar-ctl делает `systemctl start`
+# после успешного xray.Start, и `systemctl stop` перед xray.Stop.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# tun2socks сам создаёт tun0 (с CAP_NET_ADMIN).
+# Параметры:
+#   -device tun://tun0        — имя интерфейса
+#   -proxy socks5://...       — куда заворачивать
+#   -loglevel warning         — поменьше шума
+#   -mtu 1500                 — стандартный
+ExecStart=/usr/bin/tun2socks \
+    -device tun://tun0 \
+    -proxy socks5://127.0.0.1:1080 \
+    -loglevel warn \
+    -mtu 1500
+
+# Поднимаем интерфейс и роуты после старта tun2socks.
+# Сохраняем старый default чтобы 10/8, 172.16/12, 192.168/16 шли мимо туннеля.
+ExecStartPost=/usr/bin/sh -c ' \
+    set -e; \
+    sleep 0.5; \
+    ip link set tun0 up; \
+    ip addr add 198.18.0.1/15 dev tun0 2>/dev/null || true; \
+    GW=$(ip route show default | head -1 | awk "{print \\$3}"); \
+    IF=$(ip route show default | head -1 | awk "{print \\$5}"); \
+    echo "$GW $IF" > /run/xray-waybar-tun.gateway; \
+    : > /run/xray-waybar-tun.bypass-routes; \
+    if [ -f /tmp/xray-waybar-bypass.txt ]; then \
+        while read -r ip; do \
+            [ -z "$ip" ] && continue; \
+            ip route add "$ip/32" via "$GW" dev "$IF" 2>/dev/null && \
+                echo "$ip/32" >> /run/xray-waybar-tun.bypass-routes || true; \
+        done < /tmp/xray-waybar-bypass.txt; \
+    fi; \
+    ip route add 10.0.0.0/8 via "$GW" dev "$IF" 2>/dev/null || true; \
+    ip route add 172.16.0.0/12 via "$GW" dev "$IF" 2>/dev/null || true; \
+    ip route add 192.168.0.0/16 via "$GW" dev "$IF" 2>/dev/null || true; \
+    ip route add default dev tun0 metric 1 2>/dev/null || true; \
+'
+
+ExecStopPost=/usr/bin/sh -c ' \
+    ip route del default dev tun0 metric 1 2>/dev/null || true; \
+    if [ -f /run/xray-waybar-tun.gateway ]; then \
+        read GW IF < /run/xray-waybar-tun.gateway; \
+        ip route del 10.0.0.0/8 via "$GW" dev "$IF" 2>/dev/null || true; \
+        ip route del 172.16.0.0/12 via "$GW" dev "$IF" 2>/dev/null || true; \
+        ip route del 192.168.0.0/16 via "$GW" dev "$IF" 2>/dev/null || true; \
+        if [ -f /run/xray-waybar-tun.bypass-routes ]; then \
+            while read -r cidr; do \
+                [ -n "$cidr" ] && ip route del "$cidr" via "$GW" dev "$IF" 2>/dev/null || true; \
+            done < /run/xray-waybar-tun.bypass-routes; \
+            rm -f /run/xray-waybar-tun.bypass-routes; \
+        fi; \
+        rm -f /run/xray-waybar-tun.gateway; \
+    fi; \
+'
+
+Restart=on-failure
+RestartSec=2s
+
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
