@@ -145,6 +145,11 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 			}
 		}
 	}
+	// Rules are captured here (not just inside opts) so writeServerBypass
+	// can pull DNS server IPs out of them: a DomesticDNS like 77.88.8.8
+	// declared in the upstream rules.json must be host-routed mimo tun0,
+	// otherwise xray's own DNS queries loop back through SOCKS5.
+	rules := opts.Rules
 
 	raw, err := xrayconfig.Generate(s, opts)
 	if err != nil {
@@ -182,7 +187,7 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 	}
 
 	if lc.cfg.SystemWide {
-		if err := writeServerBypass(ctx, s); err != nil {
+		if err := writeServerBypass(ctx, s, rules); err != nil {
 			fmt.Fprintf(os.Stderr, "warn: bypass IP write: %v\n", err)
 		}
 		if err := sysmode.Start(ctx); err != nil {
@@ -252,14 +257,18 @@ var errNoServers = errors.New("no servers in cache; run `xray-waybar-ctl update`
 
 // writeServerBypass resolves the upstream xray server to its IPv4
 // address(es) and writes them to bypassFile alongside well-known DNS
-// servers and any nameservers from /etc/resolv.conf.
+// servers, any nameservers from /etc/resolv.conf, and any DNS server
+// IPs declared by the active routing rules (RemoteDNS / DomesticDNS).
 //
 // The TUN systemd unit reads this file on ExecStartPost and adds
 // host-routes so xray's own connection (and DNS) bypasses tun0.
 // Without this:
 //   - every packet xray emits gets looped back through the tunnel;
-//   - DNS-over-UDP doesn't survive REALITY (TCP-only), sites hang.
-func writeServerBypass(ctx context.Context, s server.Server) error {
+//   - DNS-over-UDP doesn't survive REALITY (TCP-only), sites hang;
+//   - DNS servers from rules.json (e.g. 77.88.8.8 in smart profile)
+//     loop xray's resolver back through SOCKS5 → proxy outbound, which
+//     burns CPU and grows xray's connection buffers under IPIfNonMatch.
+func writeServerBypass(ctx context.Context, s server.Server, rules *routing.Rules) error {
 	ips, err := resolveServerIPs(ctx, s.Address)
 	if err != nil {
 		return err
@@ -290,6 +299,10 @@ func writeServerBypass(ctx context.Context, s server.Server) error {
 	}
 	for _, ip := range readResolvConfNameservers() {
 		add(ip)
+	}
+	if rules != nil {
+		add(net.ParseIP(rules.RemoteDNS))
+		add(net.ParseIP(rules.DomesticDNS))
 	}
 
 	var b strings.Builder

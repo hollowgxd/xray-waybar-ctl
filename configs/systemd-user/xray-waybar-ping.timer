@@ -2,12 +2,16 @@
 Description=Run xray-waybar TCP liveness check every 30 seconds
 
 [Timer]
-# First run shortly after boot/login, then every 30 seconds. Persistent=true
-# means the timer catches up after a suspend/resume — but only once, not for
-# every 30s tick that was missed while sleeping.
+# First run shortly after boot OR shortly after the timer itself becomes
+# active (covers reinstall / `systemctl --user daemon-reload` mid-session
+# when OnBootSec is already past). After that, every 30 seconds.
+#
+# Persistent= deliberately omitted — it only works with OnCalendar=, not
+# with these monotonic anchors. Without OnActiveSec= the timer can sit
+# active-but-idle forever waiting for the service to first run.
 OnBootSec=15s
+OnActiveSec=15s
 OnUnitActiveSec=30s
-Persistent=true
 AccuracySec=1s
 
 [Install]

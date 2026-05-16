@@ -2,12 +2,16 @@
 Description=Refresh xray-waybar geo lists daily
 
 [Timer]
-# Первый прогон через 2 минуты после логина (даёт сети устаканиться),
-# дальше раз в сутки. Persistent=true ловит пропущенный тик после
-# выключения/сна (но только один — не догоняем за неделю).
+# Первый прогон через 2 минуты после загрузки ИЛИ через 2 минуты после
+# активации таймера (на случай переустановки в середине сессии когда
+# OnBootSec уже в прошлом — без OnActiveSec= таймер залипал бы пустым).
+# Дальше раз в сутки.
+#
+# Persistent= здесь не работает — он действует только с OnCalendar=,
+# не с monotonic-анкерами.
 OnBootSec=2min
+OnActiveSec=2min
 OnUnitActiveSec=24h
-Persistent=true
 AccuracySec=1m
 RandomizedDelaySec=5min
 

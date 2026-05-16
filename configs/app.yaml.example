@@ -5,8 +5,8 @@ subscription_url: "https://example.com/s/your-token"
 subscription_update_interval: 3600   # секунды; через сколько считать кэш устаревшим
 
 test_url: "http://www.gstatic.com/generate_204"
-test_timeout: 3000        # ms — таймаут одного теста
-test_concurrency: 5       # сколько серверов тестировать параллельно
+test_timeout: 6000        # ms — таймаут одного теста (WS/gRPC handshake + TLS до EU/RU обычно укладывается в 4-5с, 3с слишком впритык)
+test_concurrency: 3       # сколько серверов тестировать параллельно (выше — конкуренция за CPU на старте xray делает таймауты ложно-срабатывающими)
 
 # Приоритет серверов по имени (fragment из URI). Если пусто — берём
 # с минимальной латентностью среди живых.
