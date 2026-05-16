@@ -4,14 +4,28 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/yourgfslove/xray-waybar-ctl/internal/routing"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/server"
 )
 
-// Options controls the generated xray.json. SocksPort is required;
-// LogLevel defaults to "warning" when empty.
+// Options controls the generated xray.json.
+//
+//   - SocksPort is required.
+//   - LogLevel defaults to "warning" when empty.
+//   - Rules, when non-nil and non-empty, is materialised into
+//     routing.rules + an optional dns block. nil / empty → proxy-all
+//     (no rules, every connection goes to the proxy outbound).
+//   - ForceAllDirect, when true, overrides Rules entirely and routes
+//     every connection through the direct outbound. Used by the
+//     "direct" built-in profile.
+//
+// The tester always passes nil Rules + ForceAllDirect=false so missing
+// geoip.dat / rules.json never breaks a benchmark.
 type Options struct {
-	SocksPort int
-	LogLevel  string
+	SocksPort      int
+	LogLevel       string
+	Rules          *routing.Rules
+	ForceAllDirect bool
 }
 
 // Generate renders a complete xray-core config that routes a local
@@ -33,13 +47,17 @@ func Generate(s server.Server, opts Options) ([]byte, error) {
 	}
 	socksSettings, _ := json.Marshal(socksInboundSettings{Auth: "noauth", UDP: true})
 
+	rules, domainStrategy, dns := renderRouting(opts)
+
 	out := struct {
-		Log       LogCfg          `json:"log"`
-		Inbounds  []Inbound       `json:"inbounds"`
-		Outbounds []Outbound      `json:"outbounds"`
-		Routing   Routing         `json:"routing"`
+		Log       LogCfg     `json:"log"`
+		DNS       *DNSCfg    `json:"dns,omitempty"`
+		Inbounds  []Inbound  `json:"inbounds"`
+		Outbounds []Outbound `json:"outbounds"`
+		Routing   Routing    `json:"routing"`
 	}{
-		Log: LogCfg{Loglevel: opts.LogLevel},
+		Log: LogCfg{Loglevel: opts.LogLevel, Access: "none"},
+		DNS: dns,
 		Inbounds: []Inbound{{
 			Tag:      "socks-in",
 			Listen:   "127.0.0.1",
@@ -54,12 +72,111 @@ func Generate(s server.Server, opts Options) ([]byte, error) {
 			{Tag: "block", Protocol: "blackhole"},
 		},
 		Routing: Routing{
-			DomainStrategy: "AsIs",
-			Rules:          []RoutingRule{},
+			DomainStrategy: domainStrategy,
+			Rules:          rules,
 		},
 	}
 
 	return json.MarshalIndent(out, "", "  ")
+}
+
+// renderRouting turns Options into the three pieces Generate plugs in:
+// the rules list, the domainStrategy, and (optionally) a DNS block.
+//
+// Order of consideration:
+//  1. ForceAllDirect → single catch-all "direct" rule, no DNS.
+//  2. Rules.HasRules() → emit block/proxy/direct rules in RouteOrder.
+//     DomainStrategy mirrors the rules-file value when set; otherwise
+//     IPIfNonMatch is chosen if there are IP rules, AsIs otherwise.
+//     A DNS block is emitted only when IPIfNonMatch is active or the
+//     rules file declares Hosts.
+//  3. Otherwise → empty rules (proxy-all), no DNS.
+func renderRouting(opts Options) ([]RoutingRule, string, *DNSCfg) {
+	if opts.ForceAllDirect {
+		return []RoutingRule{
+			{Type: "field", OutboundTag: "direct", Network: "tcp,udp"},
+		}, "AsIs", nil
+	}
+
+	r := opts.Rules
+	if !r.HasRules() {
+		// Cover both nil and an all-empty rules file. xray defaults to
+		// the first outbound (proxy) for unmatched traffic, which is
+		// exactly what proxy-all wants.
+		if r != nil && len(r.Hosts) > 0 {
+			return nil, "AsIs", &DNSCfg{Servers: defaultDNSServers(r), Hosts: r.Hosts}
+		}
+		return []RoutingRule{}, "AsIs", nil
+	}
+
+	// Order: block first, then either proxy-then-direct or
+	// direct-then-proxy depending on rules.RouteOrder. xray applies the
+	// first matching rule, so the order is meaningful.
+	var rules []RoutingRule
+	rules = appendRule(rules, "block", r.BlockDomains, r.BlockIPs)
+	if r.RouteOrder == "block-direct-proxy" {
+		rules = appendRule(rules, "direct", r.DirectDomains, r.DirectIPs)
+		rules = appendRule(rules, "proxy", r.ProxyDomains, r.ProxyIPs)
+	} else {
+		// Default and upstream HAPP convention: block, proxy, direct.
+		rules = appendRule(rules, "proxy", r.ProxyDomains, r.ProxyIPs)
+		rules = appendRule(rules, "direct", r.DirectDomains, r.DirectIPs)
+	}
+
+	strategy := r.DomainStrategy
+	if strategy == "" {
+		if r.HasIPRules() {
+			strategy = "IPIfNonMatch"
+		} else {
+			strategy = "AsIs"
+		}
+	}
+
+	var dns *DNSCfg
+	if strategy == "IPIfNonMatch" || strategy == "IPOnDemand" || len(r.Hosts) > 0 {
+		dns = &DNSCfg{Servers: defaultDNSServers(r), Hosts: r.Hosts}
+	}
+	return rules, strategy, dns
+}
+
+// appendRule packs domain+ip lists for one outbound tag into the
+// routing.rules slice. xray accepts both fields on the same rule, but
+// keeps semantics cleaner if we emit one rule per (tag, kind) pair so
+// missing categories surface clearly in the rendered xray.json.
+func appendRule(rules []RoutingRule, tag string, domains, ips []string) []RoutingRule {
+	if len(domains) > 0 {
+		rules = append(rules, RoutingRule{Type: "field", OutboundTag: tag, Domain: domains})
+	}
+	if len(ips) > 0 {
+		rules = append(rules, RoutingRule{Type: "field", OutboundTag: tag, IP: ips})
+	}
+	return rules
+}
+
+// defaultDNSServers builds the dns.servers list. If the rules file
+// names a Domestic DNS we expose it as the trusted resolver for the
+// direct-side domains; otherwise plain Cloudflare + Google are used.
+// Order matters — xray queries them in sequence.
+func defaultDNSServers(r *routing.Rules) []any {
+	var servers []any
+
+	// Domestic DNS handles the direct-side domain set. Without that
+	// scoping it would also resolve proxied domains, which leaks the
+	// query through the local ISP. Empty DirectDomains → fall through
+	// to the bare-IP entry below.
+	if r != nil && r.DomesticDNS != "" && len(r.DirectDomains) > 0 {
+		servers = append(servers, map[string]any{
+			"address": r.DomesticDNS,
+			"domains": r.DirectDomains,
+		})
+	}
+	switch {
+	case r != nil && r.RemoteDNS != "":
+		servers = append(servers, r.RemoteDNS)
+	default:
+		servers = append(servers, "1.1.1.1")
+	}
+	return servers
 }
 
 func buildProxyOutbound(s server.Server) (Outbound, error) {
@@ -172,8 +289,6 @@ func buildStreamSettings(s server.Server) (*StreamSettings, error) {
 	switch ss.Network {
 	case "tcp":
 		if s.HeaderType == "http" {
-			// Minimal HTTP camouflage header. Real configurations can
-			// override this by editing xray.json post-generation.
 			hdr := map[string]any{
 				"type": "http",
 				"request": map[string]any{

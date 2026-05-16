@@ -48,6 +48,10 @@ type State struct {
 	// this crosses a threshold so a broken subscription doesn't loop
 	// `launch` forever. Reset to 0 on a healthy probe.
 	WatchdogAttempts int `json:"watchdog_attempts,omitempty"`
+
+	// Profile overrides cfg.RoutingProfile when non-empty. Set by
+	// `xray-waybar-ctl profile <name>`; cleared by `profile reset`.
+	Profile string `json:"profile,omitempty"`
 }
 
 // LoadCache reads the cache file. A missing file is not an error —

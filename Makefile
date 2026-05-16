@@ -41,22 +41,30 @@ install-monitor:
 	install -Dm644 configs/systemd-user/xray-waybar-ping.service $(HOME)/.config/systemd/user/xray-waybar-ping.service
 	install -Dm644 configs/systemd-user/xray-waybar-ping.timer $(HOME)/.config/systemd/user/xray-waybar-ping.timer
 	install -Dm644 configs/systemd-user/xray-waybar-watchdog.service $(HOME)/.config/systemd/user/xray-waybar-watchdog.service
+	install -Dm644 configs/systemd-user/xray-waybar-geo.service $(HOME)/.config/systemd/user/xray-waybar-geo.service
+	install -Dm644 configs/systemd-user/xray-waybar-geo.timer $(HOME)/.config/systemd/user/xray-waybar-geo.timer
 	systemctl --user daemon-reload
 	systemctl --user enable --now xray-waybar-ping.timer
 	systemctl --user enable --now xray-waybar-watchdog.service
+	systemctl --user enable --now xray-waybar-geo.timer
 	@echo
-	@echo "✓ ping timer + watchdog daemon installed and enabled."
+	@echo "✓ ping timer + watchdog daemon + geo timer installed and enabled."
 	@echo "  Inspect:"
 	@echo "    systemctl --user status xray-waybar-watchdog.service"
-	@echo "    systemctl --user list-timers xray-waybar-ping.timer"
+	@echo "    systemctl --user list-timers xray-waybar-ping.timer xray-waybar-geo.timer"
 	@echo "    journalctl --user -u xray-waybar-watchdog.service -f"
+	@echo "  First-time setup: run \`xray-waybar-ctl update-geo\` once now"
+	@echo "  so the geo lists are present before the timer fires."
 
 uninstall-monitor:
 	-systemctl --user disable --now xray-waybar-ping.timer
 	-systemctl --user disable --now xray-waybar-watchdog.service
+	-systemctl --user disable --now xray-waybar-geo.timer
 	rm -f $(HOME)/.config/systemd/user/xray-waybar-ping.timer
 	rm -f $(HOME)/.config/systemd/user/xray-waybar-ping.service
 	rm -f $(HOME)/.config/systemd/user/xray-waybar-watchdog.service
+	rm -f $(HOME)/.config/systemd/user/xray-waybar-geo.timer
+	rm -f $(HOME)/.config/systemd/user/xray-waybar-geo.service
 	systemctl --user daemon-reload
 
 uninstall-system:

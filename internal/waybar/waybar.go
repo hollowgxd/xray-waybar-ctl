@@ -78,6 +78,11 @@ type ConnectedOptions struct {
 	// (SystemWide && !TunActive) is the "running degraded" state.
 	SystemWide bool
 	TunActive  bool
+
+	// Profile is the active routing profile (proxy-all/smart/...). Shown
+	// in the tooltip so the user can tell at a glance whether RU traffic
+	// is being short-circuited.
+	Profile string
 }
 
 // Connected renders the running state. The text is a short tag —
@@ -110,6 +115,9 @@ func Connected(s server.Server, opt ConnectedOptions) Status {
 		}
 	} else {
 		b.WriteString("\nMode: per-app")
+	}
+	if opt.Profile != "" {
+		fmt.Fprintf(&b, "\nProfile: %s", opt.Profile)
 	}
 	if !opt.ConnectedAt.IsZero() {
 		fmt.Fprintf(&b, "\nUptime: %s", roundDuration(time.Since(opt.ConnectedAt)))

@@ -42,6 +42,90 @@ type Config struct {
 	// xray-waybar-tun.service systemd unit). When true, `connect` will
 	// start the unit after xray comes up; `disconnect` will stop it.
 	SystemWide bool `yaml:"system_wide"`
+
+	// RoutingProfile chooses how xrayconfig.Generate populates routing.rules.
+	// Two built-ins (no download, no geo files needed):
+	//   - "proxy-all" — empty rules, everything goes via the proxy outbound.
+	//   - "direct"    — everything via direct (kill switch / debug).
+	// Two URL-backed presets (resolved via RulesPresets):
+	//   - "smart"     — hydraponique HAPP/DEFAULT.JSON  (curated RU bypass)
+	//   - "whitelist" — hydraponique HAPP/WHITELIST.JSON (stricter)
+	// Or a raw https:// URL to any HAPP-shaped rules JSON, which is
+	// downloaded to <geo.dir>/rules.json and read on launch.
+	// May be overridden at runtime via `xray-waybar-ctl profile <name>`
+	// (writes to state.json and persists across restarts).
+	RoutingProfile string `yaml:"routing_profile"`
+
+	// Geo controls where geoip.dat / geosite.dat live and where to
+	// download them from. The directory is exported to xray as
+	// XRAY_LOCATION_ASSET on launch.
+	Geo GeoConfig `yaml:"geo"`
+}
+
+// GeoConfig is the geoip/geosite asset configuration.
+type GeoConfig struct {
+	Dir              string        `yaml:"dir"`
+	GeoipURL         string        `yaml:"geoip_url"`
+	GeositeURL       string        `yaml:"geosite_url"`
+	RefreshInterval  time.Duration `yaml:"-"`
+	RefreshIntervalS int           `yaml:"refresh_interval"`
+}
+
+// RulesPresets maps short names to canonical rules-JSON URLs published
+// by hydraponique/roscomvpn-routing. These pair with the matching
+// geoip.dat / geosite.dat that GeoipURL / GeositeURL point at.
+var RulesPresets = map[string]string{
+	"smart":     "https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/main/HAPP/DEFAULT.JSON",
+	"whitelist": "https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/main/HAPP/WHITELIST.JSON",
+}
+
+// BuiltinProfiles are profile names that require no rules-JSON download.
+// They are rendered entirely from code in xrayconfig.
+var BuiltinProfiles = []string{"proxy-all", "direct"}
+
+// ProfileRulesURL returns the rules-JSON URL for a profile name. Returns:
+//   - the preset URL when name is in RulesPresets
+//   - the name itself when it already looks like https:// URL
+//   - "" for built-in or unknown profiles
+func ProfileRulesURL(name string) string {
+	if u, ok := RulesPresets[name]; ok {
+		return u
+	}
+	if strings.HasPrefix(name, "https://") || strings.HasPrefix(name, "http://") {
+		return name
+	}
+	return ""
+}
+
+// IsBuiltinProfile reports whether the profile renders without a
+// downloaded rules-JSON (proxy-all / direct).
+func IsBuiltinProfile(name string) bool {
+	for _, b := range BuiltinProfiles {
+		if b == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateProfile returns nil if name is a known profile (built-in,
+// preset, or http(s) URL). Used to reject typos at config load and
+// at `profile <name>`.
+func ValidateProfile(name string) error {
+	if IsBuiltinProfile(name) {
+		return nil
+	}
+	if _, ok := RulesPresets[name]; ok {
+		return nil
+	}
+	if strings.HasPrefix(name, "https://") || strings.HasPrefix(name, "http://") {
+		return nil
+	}
+	allowed := append([]string{}, BuiltinProfiles...)
+	for k := range RulesPresets {
+		allowed = append(allowed, k)
+	}
+	return fmt.Errorf("unknown routing_profile %q (allowed: %s, or an http(s):// URL)", name, strings.Join(allowed, ", "))
 }
 
 // TestTimeout returns TestTimeoutMS as a duration.
@@ -103,6 +187,16 @@ func defaults() *Config {
 		LogFile:                 "~/.local/share/xray-waybar/xray.log",
 		CacheFile:               "~/.cache/xray-waybar/servers.json",
 		StateFile:               "~/.cache/xray-waybar/state.json",
+		RoutingProfile:          "proxy-all",
+		Geo: GeoConfig{
+			Dir: "~/.local/share/xray-waybar",
+			// Stable "latest" redirects to the most recent dated release
+			// asset. The GitHub repos publish .dat files via Releases,
+			// not on the default branch.
+			GeoipURL:         "https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat",
+			GeositeURL:       "https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat",
+			RefreshIntervalS: 86400,
+		},
 	}
 }
 
@@ -116,7 +210,7 @@ func (c *Config) normalize() error {
 	c.SubscriptionUpdateInterval = time.Duration(c.SubscriptionIntervalSec) * time.Second
 
 	var err error
-	for _, p := range []*string{&c.XrayConfig, &c.PIDFile, &c.LogFile, &c.CacheFile, &c.StateFile, &c.XrayBin} {
+	for _, p := range []*string{&c.XrayConfig, &c.PIDFile, &c.LogFile, &c.CacheFile, &c.StateFile, &c.XrayBin, &c.Geo.Dir} {
 		*p, err = expand(*p)
 		if err != nil {
 			return err
@@ -128,6 +222,16 @@ func (c *Config) normalize() error {
 	if c.TestTimeoutMS < 100 {
 		c.TestTimeoutMS = 3000
 	}
+	if c.RoutingProfile == "" {
+		c.RoutingProfile = "proxy-all"
+	}
+	if err := ValidateProfile(c.RoutingProfile); err != nil {
+		return fmt.Errorf("appconfig: %w", err)
+	}
+	if c.Geo.RefreshIntervalS < 0 {
+		return errors.New("appconfig: geo.refresh_interval must be >= 0")
+	}
+	c.Geo.RefreshInterval = time.Duration(c.Geo.RefreshIntervalS) * time.Second
 	return nil
 }
 

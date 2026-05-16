@@ -10,13 +10,32 @@ import (
 	"time"
 
 	"github.com/yourgfslove/xray-waybar-ctl/internal/appconfig"
+	"github.com/yourgfslove/xray-waybar-ctl/internal/geo"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/process"
+	"github.com/yourgfslove/xray-waybar-ctl/internal/routing"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/server"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/store"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/subscription"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/sysmode"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/xrayconfig"
 )
+
+// activeProfile returns state.Profile if set, otherwise cfg.RoutingProfile.
+// Empty result means proxy-all. Keep in one place so menu, status and
+// launch agree.
+func activeProfile(lc *loadCtx) string {
+	if lc.state != nil && lc.state.Profile != "" {
+		return lc.state.Profile
+	}
+	return lc.cfg.RoutingProfile
+}
+
+// profileNeedsRules reports whether the profile needs a downloaded
+// rules.json + geoip/geosite assets. Only the built-in proxy-all and
+// direct render entirely from code.
+func profileNeedsRules(profile string) bool {
+	return !appconfig.IsBuiltinProfile(profile) && profile != ""
+}
 
 // bypassFile is read by xray-waybar-tun.service ExecStartPost. Each
 // line is one IPv4 address that must NOT be routed through tun0 —
@@ -104,7 +123,30 @@ func findServer(cache *store.Cache, name string) (server.Server, int, error) {
 // launch swaps out xray onto the given server. It is the single place
 // that writes xray.json, stops the old process and starts the new one.
 func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
-	raw, err := xrayconfig.Generate(s, xrayconfig.Options{SocksPort: lc.cfg.XrayPort})
+	profile := activeProfile(lc)
+	opts := xrayconfig.Options{SocksPort: lc.cfg.XrayPort}
+
+	switch {
+	case profile == "direct":
+		opts.ForceAllDirect = true
+	case profileNeedsRules(profile):
+		// Load the cached rules.json. Missing rules or missing geoip.dat
+		// is recoverable: we fall back to proxy-all and warn rather than
+		// letting xray fail at start, so the user can fix it with
+		// `update-geo` without losing the connection.
+		if !geo.AssetsPresent(lc.cfg.Geo.Dir) || !geo.RulesPresent(lc.cfg.Geo.Dir) {
+			fmt.Fprintf(os.Stderr, "warn: profile %q needs geoip.dat + rules.json in %s — falling back to proxy-all. Run `xray-waybar-ctl update-geo`.\n", profile, lc.cfg.Geo.Dir)
+		} else {
+			rules, err := routing.LoadFile(geo.RulesPath(lc.cfg.Geo.Dir))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warn: cannot parse rules.json (%v) — falling back to proxy-all\n", err)
+			} else {
+				opts.Rules = rules
+			}
+		}
+	}
+
+	raw, err := xrayconfig.Generate(s, opts)
 	if err != nil {
 		return err
 	}
@@ -122,6 +164,10 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 	if n := process.KillStraysByConfig(lc.cfg.XrayConfig, lc.cfg.PIDFile); n > 0 {
 		fmt.Fprintf(os.Stderr, "launch: killed %d stray xray instance(s)\n", n)
 	}
+	var extraEnv []string
+	if lc.cfg.Geo.Dir != "" {
+		extraEnv = append(extraEnv, "XRAY_LOCATION_ASSET="+lc.cfg.Geo.Dir)
+	}
 	_, err = process.Start(ctx, process.StartOptions{
 		BinPath:      lc.cfg.XrayBin,
 		ConfigPath:   lc.cfg.XrayConfig,
@@ -129,6 +175,7 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 		LogFile:      lc.cfg.LogFile,
 		ReadyPort:    lc.cfg.XrayPort,
 		ReadyTimeout: 5 * time.Second,
+		ExtraEnv:     extraEnv,
 	})
 	if err != nil {
 		return err

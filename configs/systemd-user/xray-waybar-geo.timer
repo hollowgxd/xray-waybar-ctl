@@ -1,0 +1,15 @@
+[Unit]
+Description=Refresh xray-waybar geo lists daily
+
+[Timer]
+# Первый прогон через 2 минуты после логина (даёт сети устаканиться),
+# дальше раз в сутки. Persistent=true ловит пропущенный тик после
+# выключения/сна (но только один — не догоняем за неделю).
+OnBootSec=2min
+OnUnitActiveSec=24h
+Persistent=true
+AccuracySec=1m
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

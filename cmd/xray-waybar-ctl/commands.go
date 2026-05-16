@@ -9,6 +9,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/yourgfslove/xray-waybar-ctl/internal/appconfig"
+	"github.com/yourgfslove/xray-waybar-ctl/internal/geo"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/pinger"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/process"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/store"
@@ -16,6 +18,23 @@ import (
 	"github.com/yourgfslove/xray-waybar-ctl/internal/tester"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/waybar"
 )
+
+// knownProfiles lists profile names the menu and `profile` CLI offer
+// out of the box. Users can also pass an arbitrary http(s):// URL to
+// `profile <url>` — that is accepted but not listed here.
+func knownProfiles() []string {
+	out := append([]string{}, appconfig.BuiltinProfiles...)
+	for k := range appconfig.RulesPresets {
+		out = append(out, k)
+	}
+	// Stable order so the walker menu doesn't shuffle on every open.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
 
 // menuSep separates fields in the dmenu line. Three U+2002 EN-SPACE
 // characters render as a wide gap that is visually obvious yet still
@@ -41,6 +60,7 @@ func cmdStatus(_ context.Context) error {
 		LocalPort:   lc.cfg.XrayPort,
 		ConnectedAt: lc.state.ConnectedAt,
 		SystemWide:  lc.cfg.SystemWide,
+		Profile:     activeProfile(lc),
 	}
 	if lc.cfg.SystemWide {
 		if state, _ := sysmode.Status(context.Background()); state == sysmode.StateActive {
@@ -316,8 +336,10 @@ func cmdPing(ctx context.Context) error {
 	return store.SaveState(lc.cfg.StateFile, lc.state)
 }
 
-// cmdMenu opens a walker --dmenu picker of cached servers. The user
-// sees liveness markers and latencies; choosing an entry runs `use`.
+// cmdMenu opens a walker --dmenu picker of cached servers. The first
+// row is a "go to profiles" pivot — selecting it opens a second walker
+// listing the routing profiles, so the main list stays focused on
+// servers.
 //
 // We don't kick off a fresh URL-test here on purpose — that takes
 // several seconds and the user clicked expecting an immediate picker.
@@ -341,6 +363,10 @@ func cmdMenu(ctx context.Context) error {
 	if lc.state.Active != nil {
 		currentName = lc.state.Active.Name
 	}
+	// One pivot row. The leading gear glyph + trailing arrow telegraph
+	// "this opens another menu", and is also how parseMenuChoice routes
+	// the selection to cmdMenuProfiles.
+	fmt.Fprintf(&lines, "%s%sProfile: %s%s→\n", profileMenuMarker, menuSep, activeProfile(lc), menuSep)
 	for _, s := range lc.cache.Servers {
 		marker := "○" // untested
 		info := "—"
@@ -360,22 +386,12 @@ func cmdMenu(ctx context.Context) error {
 		fmt.Fprintf(&lines, "%s%s%s%s%s%s\n", prefix, marker, menuSep, s.Name, menuSep, info)
 	}
 
-	args := []string{"--dmenu", "--placeholder", "Pick a server"}
-	if currentName != "" {
-		args = append(args, "--current", currentName)
+	choice, err := runWalker(ctx, lines.String(), "Pick a server", currentName)
+	if err != nil || choice == "" {
+		return err
 	}
-	cmd := exec.CommandContext(ctx, "walker", args...)
-	cmd.Stdin = strings.NewReader(lines.String())
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	if err != nil {
-		// non-zero exit usually means the user pressed Esc — that is
-		// not an error worth surfacing.
-		return nil
-	}
-	choice := strings.TrimSpace(string(out))
-	if choice == "" {
-		return nil
+	if strings.HasPrefix(choice, profileMenuMarker) {
+		return cmdMenuProfiles(ctx)
 	}
 	parts := strings.Split(choice, menuSep)
 	if len(parts) < 2 {
@@ -383,6 +399,180 @@ func cmdMenu(ctx context.Context) error {
 	}
 	name := strings.TrimSpace(parts[1])
 	return cmdUse(ctx, name)
+}
+
+// cmdMenuProfiles is the second-level walker showing every known
+// profile (built-ins + RulesPresets). Selecting one delegates to
+// cmdProfile, which handles the download + reconnect.
+func cmdMenuProfiles(ctx context.Context) error {
+	lc, err := loadAll()
+	if err != nil {
+		return err
+	}
+	current := activeProfile(lc)
+	var lines strings.Builder
+	for _, p := range knownProfiles() {
+		tag := ""
+		if p == current {
+			tag = "(active)"
+		}
+		// Same leading glyph as the pivot row so the menus feel like
+		// one continuous walker session.
+		fmt.Fprintf(&lines, "%s%s%s%s%s\n", profileMenuMarker, menuSep, p, menuSep, tag)
+	}
+	choice, err := runWalker(ctx, lines.String(), "Routing profile", current)
+	if err != nil || choice == "" {
+		return err
+	}
+	parts := strings.Split(choice, menuSep)
+	if len(parts) < 2 {
+		return fmt.Errorf("unparseable profile selection %q", choice)
+	}
+	name := strings.TrimSpace(parts[1])
+	return cmdProfile(ctx, []string{name})
+}
+
+// runWalker is the small wrapper around `walker --dmenu` shared by the
+// server and profile menus. Non-zero exit (Esc) becomes (nil, nil) so
+// the caller can treat "no choice" uniformly.
+func runWalker(ctx context.Context, stdin, placeholder, current string) (string, error) {
+	args := []string{"--dmenu", "--placeholder", placeholder}
+	if current != "" {
+		args = append(args, "--current", current)
+	}
+	cmd := exec.CommandContext(ctx, "walker", args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// profileMenuMarker is the leading glyph the menu parser uses to tell
+// "open profile picker" from a server pick. Picked to be visually
+// distinct and to never appear in a server fragment.
+const profileMenuMarker = "⚙"
+
+// cmdUpdateGeo downloads geoip.dat / geosite.dat plus the rules.json
+// for the active profile (if it has one). When any file actually
+// changed and xray is currently running on a rules-backed profile,
+// triggers a reconnect so the new lists take effect.
+func cmdUpdateGeo(ctx context.Context) error {
+	lc, err := loadAll()
+	if err != nil {
+		return err
+	}
+	rulesURL := ""
+	if profileNeedsRules(activeProfile(lc)) {
+		rulesURL = appconfig.ProfileRulesURL(activeProfile(lc))
+	}
+	results, ferr := geo.Update(ctx, geo.Sources{
+		Dir:        lc.cfg.Geo.Dir,
+		GeoipURL:   lc.cfg.Geo.GeoipURL,
+		GeositeURL: lc.cfg.Geo.GeositeURL,
+		RulesURL:   rulesURL,
+	})
+	for _, r := range results {
+		state := "unchanged"
+		if r.Changed {
+			state = "updated"
+		}
+		fmt.Fprintf(os.Stderr, "%s: %s (%d bytes)\n", r.Name, state, r.Bytes)
+	}
+	if ferr != nil {
+		return ferr
+	}
+
+	anyChanged := false
+	for _, r := range results {
+		if r.Changed {
+			anyChanged = true
+			break
+		}
+	}
+	if !anyChanged {
+		return nil
+	}
+	if running, _ := process.IsRunning(lc.cfg.PIDFile); running && profileNeedsRules(activeProfile(lc)) {
+		fmt.Fprintln(os.Stderr, "geo assets changed — reconnecting to pick up new lists")
+		return cmdReconnect(ctx)
+	}
+	return nil
+}
+
+// cmdProfile prints the active profile when called without args, or
+// updates state.Profile and reconnects when called with one. Accepts:
+//   - "proxy-all" / "direct"                       — built-ins
+//   - any key from appconfig.RulesPresets          — downloads its rules
+//   - a raw http(s):// URL to a HAPP rules JSON    — downloads it
+//   - "reset"                                      — clears the override
+func cmdProfile(ctx context.Context, args []string) error {
+	lc, err := loadAll()
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		current := activeProfile(lc)
+		source := "config"
+		if lc.state.Profile != "" {
+			source = "state override"
+		}
+		fmt.Printf("current profile: %s (%s)\n", current, source)
+		fmt.Printf("known: %s\n", strings.Join(knownProfiles(), ", "))
+		fmt.Println("also accepted: any http(s):// URL to a HAPP rules JSON, or 'reset'")
+		return nil
+	}
+	name := args[0]
+	if name == "reset" {
+		lc.state.Profile = ""
+	} else {
+		if err := appconfig.ValidateProfile(name); err != nil {
+			return err
+		}
+		lc.state.Profile = name
+	}
+	if err := store.SaveState(lc.cfg.StateFile, lc.state); err != nil {
+		return err
+	}
+	resolved := activeProfile(lc)
+	fmt.Fprintf(os.Stderr, "profile set to %s\n", resolved)
+
+	// If the new profile needs rules.json, fetch it now. We call
+	// geo.Update directly (rather than cmdUpdateGeo) so we don't end
+	// up reconnecting twice — the explicit cmdReconnect below is the
+	// canonical point for that.
+	if profileNeedsRules(resolved) {
+		results, ferr := geo.Update(ctx, geo.Sources{
+			Dir:        lc.cfg.Geo.Dir,
+			GeoipURL:   lc.cfg.Geo.GeoipURL,
+			GeositeURL: lc.cfg.Geo.GeositeURL,
+			RulesURL:   appconfig.ProfileRulesURL(resolved),
+		})
+		for _, r := range results {
+			state := "unchanged"
+			if r.Changed {
+				state = "updated"
+			}
+			fmt.Fprintf(os.Stderr, "%s: %s (%d bytes)\n", r.Name, state, r.Bytes)
+		}
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "warn: update-geo for profile %q: %v\n", resolved, ferr)
+		}
+	} else {
+		// Built-in profile — drop the stale rules.json so a fallback
+		// reload doesn't accidentally pick up the previous profile's
+		// rules. Keep geoip/geosite (cheap to leave around, harmless).
+		_ = geo.RemoveRules(lc.cfg.Geo.Dir)
+	}
+
+	// Reconnect only if xray is currently running. Otherwise the next
+	// `connect` will pick up the new profile automatically.
+	if running, _ := process.IsRunning(lc.cfg.PIDFile); !running || lc.state.Active == nil {
+		return nil
+	}
+	return cmdReconnect(ctx)
 }
 
 func saveResults(lc *loadCtx, results []tester.Result) {

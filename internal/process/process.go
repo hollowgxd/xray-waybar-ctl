@@ -31,6 +31,11 @@ type StartOptions struct {
 	ReadyPort int
 	// ReadyTimeout caps how long Start waits for the port to open.
 	ReadyTimeout time.Duration
+
+	// ExtraEnv is appended to os.Environ() before launch — typically
+	// "XRAY_LOCATION_ASSET=…" so xray finds geoip.dat / geosite.dat in
+	// the user-owned share directory instead of /usr/share/xray.
+	ExtraEnv []string
 }
 
 // Start launches xray detached from the current terminal, writes the
@@ -56,6 +61,9 @@ func Start(ctx context.Context, opts StartOptions) (int, error) {
 	cmd.Stdout = logF
 	cmd.Stderr = logF
 	cmd.Stdin = nil
+	if len(opts.ExtraEnv) > 0 {
+		cmd.Env = append(os.Environ(), opts.ExtraEnv...)
+	}
 	// Setsid detaches from our terminal so closing the shell that
 	// launched us does not also kill xray.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

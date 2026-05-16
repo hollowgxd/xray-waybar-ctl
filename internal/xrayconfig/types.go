@@ -7,6 +7,11 @@ import "encoding/json"
 
 type LogCfg struct {
 	Loglevel string `json:"loglevel"`
+	// Access "none" disables the per-connection access log. xray-core
+	// writes it by default at warning level too, and on a system-wide
+	// TUN setup a normal browsing session produces ~MB/min of churn
+	// (every TCP connect from every page becomes a line).
+	Access string `json:"access,omitempty"`
 }
 
 type Inbound struct {
@@ -33,6 +38,17 @@ type RoutingRule struct {
 	OutboundTag string   `json:"outboundTag"`
 	IP          []string `json:"ip,omitempty"`
 	Domain      []string `json:"domain,omitempty"`
+	Network     string   `json:"network,omitempty"`
+}
+
+// DNSCfg is the xray DNS block. Emitted only when the active rules
+// require IPIfNonMatch resolution (any IP-side rule), or when the
+// rules ship explicit Hosts overrides. xray's built-in resolver
+// handles the no-rules case fine.
+type DNSCfg struct {
+	Servers []any             `json:"servers"`
+	Hosts   map[string]string `json:"hosts,omitempty"`
+	Tag     string            `json:"tag,omitempty"`
 }
 
 type Outbound struct {

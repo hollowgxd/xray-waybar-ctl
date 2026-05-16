@@ -30,3 +30,36 @@ state_file: "~/.cache/xray-waybar/state.json"
 #   sudo make install-system
 # Bypass для 10/8, 172.16/12, 192.168/16 встроен в unit.
 system_wide: false
+
+# Профиль роутинга внутри xray. Правила-списки (что в proxy, что в
+# direct, что блокировать) НЕ хардкодятся в этом CLI — они скачиваются
+# из roscomvpn-routing того же мейнтейнера что geoip/geosite, поэтому
+# списки всегда совпадают с .dat-файлами.
+#
+#   proxy-all   — всё через VPN. Никаких скачиваний, никаких списков.
+#   direct      — всё direct (kill switch / debug; VPN выключен).
+#   smart       — HAPP/DEFAULT.JSON: разумный набор для РФ (telegram/
+#                 youtube/github через proxy, RU-сайты direct, ads/torrent
+#                 блок). Требует geoip.dat/geosite.dat (тянутся при первой
+#                 же `xray-waybar-ctl update-geo`).
+#   whitelist   — HAPP/WHITELIST.JSON: проксируется ТОЛЬКО whitelist,
+#                 остальное direct. Самый узкий профиль.
+#   <https-url> — любой свой rules.json в HAPP-формате (DirectSites/
+#                 ProxySites/BlockSites/DnsHosts/…).
+#
+# Переключается на лету: `xray-waybar-ctl profile <name>` (запишется в
+# state.json и перебьёт значение отсюда до `xray-waybar-ctl profile reset`).
+# В walker первый пункт меню — «Profile: …» — открывает подменю выбора.
+routing_profile: proxy-all
+
+# Где живут geoip.dat / geosite.dat. Папка пробрасывается в xray
+# через переменную окружения XRAY_LOCATION_ASSET.
+# Скачиваются командой `xray-waybar-ctl update-geo` (или systemd-таймером
+# xray-waybar-geo.timer, ставится через `make install-monitor`).
+geo:
+  dir: "~/.local/share/xray-waybar"
+  # GitHub Releases /latest/download/ — 302-редирект на актуальный
+  # тегированный ассет. Файлы публикуются примерно раз в сутки.
+  geoip_url:   "https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat"
+  geosite_url: "https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat"
+  refresh_interval: 86400   # секунды; 0 = вручную

@@ -58,6 +58,19 @@ Waybar:
   status            Emit one line of JSON describing the current state
   menu              Open a walker dmenu picker of cached servers; selection → use
 
+Routing:
+  profile [name]    Show or change routing profile. Without args: print
+                    the active profile. Accepts:
+                      proxy-all | direct     — built-ins, no download
+                      smart | whitelist      — hydraponique HAPP presets
+                      https://…/rules.json   — any HAPP-shaped rules file
+                      reset                  — clear override, use app.yaml
+                    Downloads rules.json + geoip/geosite as needed and
+                    reconnects xray if it is running.
+  update-geo        Download geoip.dat / geosite.dat + the rules.json of
+                    the active profile into the configured asset dir;
+                    reconnects automatically if anything actually changed.
+
 Misc:
   version           Print version
   help              Show this help
@@ -110,6 +123,10 @@ func run(ctx context.Context, args []string) error {
 		return cmdUseDir(ctx, +1)
 	case "use-prev":
 		return cmdUseDir(ctx, -1)
+	case "profile":
+		return cmdProfile(ctx, args)
+	case "update-geo":
+		return cmdUpdateGeo(ctx)
 	default:
 		return fmt.Errorf("unknown command %q: %w", cmd, errUsage)
 	}

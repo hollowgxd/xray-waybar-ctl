@@ -1,0 +1,16 @@
+[Unit]
+Description=xray-waybar — refresh geoip.dat / geosite.dat
+# Только при наличии сети. Без этого первый OnBootSec тик после
+# свежего логина падает с DNS-ошибкой и Persistent=true перетягивает
+# его на потом — но шум в journal лишний.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/xray-waybar-ctl update-geo
+Nice=15
+IOSchedulingClass=idle
+
+# Сетевая операция, не критичная по времени — таймауты внутри CLI.
+TimeoutStartSec=2m
