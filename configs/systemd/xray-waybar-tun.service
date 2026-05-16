@@ -65,6 +65,15 @@ ExecStopPost=/usr/bin/sh -c ' \
 Restart=on-failure
 RestartSec=2s
 
+# Safety net: when xray dies behind tun2socks, the latter busy-loops on
+# `connect: cannot assign requested address` and grows netstack buffers
+# at ~70 MB/s. The user-session watchdog catches this within ~10s, but
+# if that ever fails to fire (suspended laptop, crashed timer), this
+# cap turns runaway growth into a clean OOMKill instead of swapping the
+# whole machine to death. Steady-state tun2socks RSS is <50 MB so the
+# headroom is generous.
+MemoryMax=256M
+
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 

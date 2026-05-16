@@ -114,6 +114,14 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 	if err := process.Stop(lc.cfg.PIDFile, 2*time.Second); err != nil {
 		return err
 	}
+	// Defense in depth: even if Stop above did the right thing, scan for
+	// any other xray that's still alive against our config (e.g. orphaned
+	// by an earlier crash, or spawned by a racing `connect`) and SIGKILL
+	// it. Otherwise process.Start would happily add yet another instance
+	// and the leak compounds.
+	if n := process.KillStraysByConfig(lc.cfg.XrayConfig, lc.cfg.PIDFile); n > 0 {
+		fmt.Fprintf(os.Stderr, "launch: killed %d stray xray instance(s)\n", n)
+	}
 	_, err = process.Start(ctx, process.StartOptions{
 		BinPath:      lc.cfg.XrayBin,
 		ConfigPath:   lc.cfg.XrayConfig,

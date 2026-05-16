@@ -119,9 +119,90 @@ func Stop(pidFile string, gracePeriod time.Duration) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	// SIGTERM didn't take. Force-kill and *wait* for the process table
+	// entry to actually clear before returning. Under memory pressure
+	// the kernel can take hundreds of ms to deliver SIGKILL; if we
+	// remove the PID file and return immediately, a follow-up
+	// process.Start will pass IsRunning() and spawn a duplicate while
+	// the old one is still alive — that is exactly how 30+ xray
+	// orphans accumulated once.
 	_ = proc.Signal(syscall.SIGKILL)
+	killDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(killDeadline) {
+		if !isAlive(pid) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	_ = os.Remove(pidFile)
 	return nil
+}
+
+// KillStraysByConfig SIGKILLs every xray-core process whose argv contains
+// `-config <configPath>` and whose PID is NOT pidFile's recorded PID.
+//
+// This is a belt-and-braces cleanup: in theory, the Stop → Start sequence
+// in launch() is enough to keep at most one xray per config alive. In
+// practice, observed bugs (e.g. SIGKILL racing the PID-file removal, or
+// `connect` running concurrently with the watchdog) have produced 30+
+// orphan xrays. Scanning /proc and killing matches before each launch
+// turns a logic bug into a self-healing event instead of a process leak.
+//
+// configPath is matched byte-for-byte against an argv entry. Returns the
+// number of processes killed (best-effort: errors per-PID are swallowed).
+func KillStraysByConfig(configPath, pidFile string) int {
+	if configPath == "" {
+		return 0
+	}
+	keep := 0
+	if pid, err := readPID(pidFile); err == nil {
+		keep = pid
+	}
+
+	procs, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	killed := 0
+	for _, entry := range procs {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 || pid == keep || pid == os.Getpid() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		// /proc/<pid>/cmdline is NUL-separated argv. Split and look for
+		// an exact `-config` + path pair so a substring collision can't
+		// false-positive.
+		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if !matchesXrayConfig(argv, configPath) {
+			continue
+		}
+		if err := syscall.Kill(pid, syscall.SIGKILL); err == nil {
+			killed++
+		}
+	}
+	return killed
+}
+
+// matchesXrayConfig returns true if argv looks like `xray ... -config <path>`.
+func matchesXrayConfig(argv []string, configPath string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	// The binary path can be anything ending in /xray (system path) or
+	// the bare name. Don't constrain it — we identify by the config arg.
+	for i := 0; i < len(argv)-1; i++ {
+		if argv[i] == "-config" && argv[i+1] == configPath {
+			return true
+		}
+	}
+	return false
 }
 
 // IsRunning reports whether the PID in the file refers to a live process.

@@ -33,23 +33,30 @@ install-system:
 	@echo "  ensure your user is in the `wheel` group, then:"
 	@echo "    xray-waybar-ctl connect"
 
-# Installs a systemd --user timer that runs `xray-waybar-ctl ping` every 30s,
-# keeping state.Results fresh so the waybar tooltip and menu show live status.
+# Installs the user-session monitoring:
+#   - xray-waybar-ping.timer       (every 30s) — keeps state.Results fresh for menu/tooltip
+#   - xray-waybar-watchdog.service (long-lived) — internal 10s loop, auto-reconnects when xray dies behind TUN
 # Requires that `make install` has put the binary at $(PREFIX)/bin first.
 install-monitor:
 	install -Dm644 configs/systemd-user/xray-waybar-ping.service $(HOME)/.config/systemd/user/xray-waybar-ping.service
 	install -Dm644 configs/systemd-user/xray-waybar-ping.timer $(HOME)/.config/systemd/user/xray-waybar-ping.timer
+	install -Dm644 configs/systemd-user/xray-waybar-watchdog.service $(HOME)/.config/systemd/user/xray-waybar-watchdog.service
 	systemctl --user daemon-reload
 	systemctl --user enable --now xray-waybar-ping.timer
+	systemctl --user enable --now xray-waybar-watchdog.service
 	@echo
-	@echo "✓ ping timer installed and enabled."
-	@echo "  Inspect with: systemctl --user list-timers xray-waybar-ping.timer"
-	@echo "               journalctl --user -u xray-waybar-ping.service -f"
+	@echo "✓ ping timer + watchdog daemon installed and enabled."
+	@echo "  Inspect:"
+	@echo "    systemctl --user status xray-waybar-watchdog.service"
+	@echo "    systemctl --user list-timers xray-waybar-ping.timer"
+	@echo "    journalctl --user -u xray-waybar-watchdog.service -f"
 
 uninstall-monitor:
 	-systemctl --user disable --now xray-waybar-ping.timer
+	-systemctl --user disable --now xray-waybar-watchdog.service
 	rm -f $(HOME)/.config/systemd/user/xray-waybar-ping.timer
 	rm -f $(HOME)/.config/systemd/user/xray-waybar-ping.service
+	rm -f $(HOME)/.config/systemd/user/xray-waybar-watchdog.service
 	systemctl --user daemon-reload
 
 uninstall-system:

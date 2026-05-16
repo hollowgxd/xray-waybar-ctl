@@ -1,0 +1,23 @@
+[Unit]
+Description=xray-waybar — auto-reconnect watchdog (detects dead/stuck xray)
+# Long-lived daemon: ticks internally every --loop interval instead of
+# being driven by a timer. Avoids `Started/Finished` log spam and the
+# fork/exec cost of spawning a Go process every 10 seconds.
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/xray-waybar-ctl watchdog --loop 10s
+
+# If the watchdog itself crashes, come back up — but with a backoff so
+# a persistent bug doesn't spin.
+Restart=on-failure
+RestartSec=5s
+
+# Watchdog can briefly burst when recovering (test ports, write config,
+# restart xray, restart TUN). Cap it so a runaway watchdog never
+# starves user processes.
+CPUQuota=50%
+Nice=5
+
+[Install]
+WantedBy=default.target

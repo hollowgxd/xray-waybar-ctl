@@ -38,10 +38,16 @@ type TestResult struct {
 // State captures runtime information: which server is currently active,
 // and the most recent batch of test results.
 type State struct {
-	ConnectedAt time.Time              `json:"connected_at,omitempty"`
-	Active      *server.Server         `json:"active,omitempty"`
-	TestedAt    time.Time              `json:"tested_at,omitempty"`
-	Results     map[string]TestResult  `json:"results,omitempty"`
+	ConnectedAt time.Time             `json:"connected_at,omitempty"`
+	Active      *server.Server        `json:"active,omitempty"`
+	TestedAt    time.Time             `json:"tested_at,omitempty"`
+	Results     map[string]TestResult `json:"results,omitempty"`
+
+	// WatchdogAttempts counts consecutive auto-reconnect attempts since
+	// the last healthy check. The watchdog gives up (clears Active) once
+	// this crosses a threshold so a broken subscription doesn't loop
+	// `launch` forever. Reset to 0 on a healthy probe.
+	WatchdogAttempts int `json:"watchdog_attempts,omitempty"`
 }
 
 // LoadCache reads the cache file. A missing file is not an error —

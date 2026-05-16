@@ -47,6 +47,9 @@ Servers:
   list              Show cached servers
   test              URL-test every cached server, print latency table
   ping              TCP-only liveness check (cheap; used by systemd timer)
+  watchdog [--loop D]  Detect a dead/stuck xray and auto-reconnect.
+                       Without --loop: one tick (manual use).
+                       --loop 10s: daemon mode (used by systemd user service).
   use <name>        Connect to a specific server (by fragment name)
   use-next          Switch to the next server in the cached list
   use-prev          Switch to the previous server in the cached list
@@ -96,6 +99,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdTest(ctx)
 	case "ping":
 		return cmdPing(ctx)
+	case "watchdog":
+		return cmdWatchdog(ctx, args)
 	case "use":
 		if len(args) < 1 {
 			return fmt.Errorf("use: server name required: %w", errUsage)
