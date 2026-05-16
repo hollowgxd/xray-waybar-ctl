@@ -1,0 +1,10 @@
+[Unit]
+Description=xray-waybar — periodic TCP liveness check of cached servers
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/xray-waybar-ctl ping
+Nice=10
+
+# Ping shouldn't be the reason your laptop wakes up. Best-effort scheduling.
+IOSchedulingClass=idle

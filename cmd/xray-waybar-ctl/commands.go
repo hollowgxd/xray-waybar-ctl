@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/yourgfslove/xray-waybar-ctl/internal/pinger"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/process"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/store"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/sysmode"
@@ -268,6 +269,51 @@ func cmdUseDir(ctx context.Context, step int) error {
 		idx = (idx + step + len(lc.cache.Servers)) % len(lc.cache.Servers)
 	}
 	return launch(ctx, lc, lc.cache.Servers[idx])
+}
+
+// cmdPing runs a TCP-level liveness check on every cached server and
+// merges the result into state.Results. It is the cheap, periodic
+// counterpart to `test` — meant to be driven by a 30s systemd timer.
+//
+// On purpose: ping never overwrites the URL-test latency. The real
+// HTTP-through-proxy number is more accurate; we only refresh Alive
+// (and stamp a fresh MeasuredAt so stale rows can be detected later).
+func cmdPing(ctx context.Context) error {
+	lc, err := loadAll()
+	if err != nil {
+		return err
+	}
+	if len(lc.cache.Servers) == 0 {
+		return errNoServers
+	}
+
+	results := pinger.PingAll(ctx, lc.cache.Servers, lc.cfg.TestTimeout())
+	if lc.state.Results == nil {
+		lc.state.Results = make(map[string]store.TestResult, len(results))
+	}
+	now := time.Now()
+	for _, r := range results {
+		prev := lc.state.Results[r.Server.Name]
+		latency := prev.Latency
+		if latency == 0 {
+			// First-time entry — seed with TCP latency until a real
+			// URL test runs.
+			latency = r.Latency
+		}
+		errStr := ""
+		if r.Error != nil {
+			errStr = r.Error.Error()
+		}
+		lc.state.Results[r.Server.Name] = store.TestResult{
+			Name:       r.Server.Name,
+			Latency:    latency,
+			Alive:      r.Alive,
+			Error:      errStr,
+			MeasuredAt: now,
+		}
+	}
+	lc.state.TestedAt = now
+	return store.SaveState(lc.cfg.StateFile, lc.state)
 }
 
 // cmdMenu opens a walker --dmenu picker of cached servers. The user

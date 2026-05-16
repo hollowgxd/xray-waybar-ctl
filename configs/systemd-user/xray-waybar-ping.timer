@@ -1,0 +1,14 @@
+[Unit]
+Description=Run xray-waybar TCP liveness check every 30 seconds
+
+[Timer]
+# First run shortly after boot/login, then every 30 seconds. Persistent=true
+# means the timer catches up after a suspend/resume — but only once, not for
+# every 30s tick that was missed while sleeping.
+OnBootSec=15s
+OnUnitActiveSec=30s
+Persistent=true
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

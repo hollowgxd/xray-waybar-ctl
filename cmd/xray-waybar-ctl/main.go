@@ -46,6 +46,7 @@ Servers:
   update            Re-fetch the subscription into the local cache
   list              Show cached servers
   test              URL-test every cached server, print latency table
+  ping              TCP-only liveness check (cheap; used by systemd timer)
   use <name>        Connect to a specific server (by fragment name)
   use-next          Switch to the next server in the cached list
   use-prev          Switch to the previous server in the cached list
@@ -93,6 +94,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdList(ctx)
 	case "test":
 		return cmdTest(ctx)
+	case "ping":
+		return cmdPing(ctx)
 	case "use":
 		if len(args) < 1 {
 			return fmt.Errorf("use: server name required: %w", errUsage)

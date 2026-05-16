@@ -3,7 +3,7 @@ PREFIX   ?= $(HOME)/.local
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: build install uninstall install-system uninstall-system test vet tidy clean run-status
+.PHONY: build install uninstall install-system uninstall-system install-monitor uninstall-monitor test vet tidy clean run-status
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/xray-waybar-ctl
@@ -32,6 +32,25 @@ install-system:
 	@echo "  Add `system_wide: true` to ~/.config/xray-waybar/app.yaml,"
 	@echo "  ensure your user is in the `wheel` group, then:"
 	@echo "    xray-waybar-ctl connect"
+
+# Installs a systemd --user timer that runs `xray-waybar-ctl ping` every 30s,
+# keeping state.Results fresh so the waybar tooltip and menu show live status.
+# Requires that `make install` has put the binary at $(PREFIX)/bin first.
+install-monitor:
+	install -Dm644 configs/systemd-user/xray-waybar-ping.service $(HOME)/.config/systemd/user/xray-waybar-ping.service
+	install -Dm644 configs/systemd-user/xray-waybar-ping.timer $(HOME)/.config/systemd/user/xray-waybar-ping.timer
+	systemctl --user daemon-reload
+	systemctl --user enable --now xray-waybar-ping.timer
+	@echo
+	@echo "✓ ping timer installed and enabled."
+	@echo "  Inspect with: systemctl --user list-timers xray-waybar-ping.timer"
+	@echo "               journalctl --user -u xray-waybar-ping.service -f"
+
+uninstall-monitor:
+	-systemctl --user disable --now xray-waybar-ping.timer
+	rm -f $(HOME)/.config/systemd/user/xray-waybar-ping.timer
+	rm -f $(HOME)/.config/systemd/user/xray-waybar-ping.service
+	systemctl --user daemon-reload
 
 uninstall-system:
 	@if [ "$$(id -u)" != "0" ]; then \
