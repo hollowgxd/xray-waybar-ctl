@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -422,6 +424,14 @@ func cmdMenu(ctx context.Context) error {
 	// "this opens another menu", and is also how parseMenuChoice routes
 	// the selection to cmdMenuProfiles.
 	fmt.Fprintf(&lines, "%s%sProfile: %s%s→\n", profileMenuMarker, menuSep, activeProfile(lc), menuSep)
+	currentIdx := -1
+	for i, s := range lc.cache.Servers {
+		if s.Name == currentName {
+			// +1 because the pivot row is line 0.
+			currentIdx = i + 1
+			break
+		}
+	}
 	for _, s := range lc.cache.Servers {
 		marker := "○" // untested
 		info := "—"
@@ -441,12 +451,22 @@ func cmdMenu(ctx context.Context) error {
 		fmt.Fprintf(&lines, "%s%s%s%s%s%s\n", prefix, marker, menuSep, s.Name, menuSep, info)
 	}
 
-	choice, err := runWalker(ctx, lines.String(), "Pick a server", currentName)
+	choice, err := runWalker(ctx, lines.String(), "Pick a server", currentIdx)
 	if err != nil || choice == "" {
 		return err
 	}
 	if strings.HasPrefix(choice, profileMenuMarker) {
-		return cmdMenuProfiles(ctx)
+		// Fork a fresh `xray-waybar-ctl menu-profiles` instead of
+		// calling cmdMenuProfiles inline. Two walker invocations
+		// back-to-back in the same parent process race on focus and
+		// keyboard input under Hyprland — the Enter that closed the
+		// first walker is replayed into the just-spawned second one,
+		// which silently picks the first row and exits. A detached
+		// child started after the first walker fully released its
+		// Wayland surface gets a clean activation. Fire-and-forget:
+		// the user already moved on from the server menu, no need
+		// to wait or report errors back here.
+		return spawnDetached("menu-profiles")
 	}
 	parts := strings.Split(choice, menuSep)
 	if len(parts) < 2 {
@@ -466,16 +486,18 @@ func cmdMenuProfiles(ctx context.Context) error {
 	}
 	current := activeProfile(lc)
 	var lines strings.Builder
-	for _, p := range knownProfiles() {
+	currentIdx := -1
+	for i, p := range knownProfiles() {
 		tag := ""
 		if p == current {
 			tag = "(active)"
+			currentIdx = i
 		}
 		// Same leading glyph as the pivot row so the menus feel like
 		// one continuous walker session.
 		fmt.Fprintf(&lines, "%s%s%s%s%s\n", profileMenuMarker, menuSep, p, menuSep, tag)
 	}
-	choice, err := runWalker(ctx, lines.String(), "Routing profile", current)
+	choice, err := runWalker(ctx, lines.String(), "Routing profile", currentIdx)
 	if err != nil || choice == "" {
 		return err
 	}
@@ -488,21 +510,62 @@ func cmdMenuProfiles(ctx context.Context) error {
 }
 
 // runWalker is the small wrapper around `walker --dmenu` shared by the
-// server and profile menus. Non-zero exit (Esc) becomes (nil, nil) so
-// the caller can treat "no choice" uniformly.
-func runWalker(ctx context.Context, stdin, placeholder, current string) (string, error) {
+// server and profile menus. Esc / no selection produces empty stdout
+// and we return ("", nil); a real spawn failure (walker not on PATH,
+// killed by ctx) now surfaces instead of being swallowed as Esc — that
+// previously hid the very bug this comment is about.
+//
+// currentIdx is the 0-based line index to preselect, or -1 for none.
+// Walker's --current takes an integer, NOT a string match — passing a
+// name like "smart" makes walker exit with `Cannot parse integer value`
+// and, in a detached child whose stderr is /dev/null, the menu just
+// silently never appears.
+func runWalker(ctx context.Context, stdin, placeholder string, currentIdx int) (string, error) {
 	args := []string{"--dmenu", "--placeholder", placeholder}
-	if current != "" {
-		args = append(args, "--current", current)
+	if currentIdx >= 0 {
+		args = append(args, "--current", strconv.Itoa(currentIdx))
 	}
 	cmd := exec.CommandContext(ctx, "walker", args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", nil
+		if _, ok := err.(*exec.ExitError); ok {
+			// Non-zero exit: walker convention for "user dismissed".
+			return "", nil
+		}
+		return "", fmt.Errorf("walker: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// spawnDetached re-execs this binary with the given subcommand as a
+// fully detached child (new session, stdio redirected to /dev/null) so
+// no Wayland focus / keyboard state leaks from the parent into the
+// child's walker invocation. Returns once the child has been started
+// — we deliberately do not wait for it.
+func spawnDetached(subcommand string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("spawnDetached: locate self: %w", err)
+	}
+	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("spawnDetached: open /dev/null: %w", err)
+	}
+	defer devnull.Close()
+
+	cmd := exec.Command(self, subcommand)
+	cmd.Stdin = devnull
+	cmd.Stdout = devnull
+	cmd.Stderr = devnull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("spawnDetached: start %s: %w", subcommand, err)
+	}
+	// Release so the child doesn't become a zombie if our caller is
+	// short-lived (it always is — cmdMenu returns right after this).
+	return cmd.Process.Release()
 }
 
 // profileMenuMarker is the leading glyph the menu parser uses to tell

@@ -57,6 +57,7 @@ Servers:
 Waybar:
   status            Emit one line of JSON describing the current state
   menu              Open a walker dmenu picker of cached servers; selection → use
+  menu-profiles     Open a walker dmenu picker of routing profiles (also reachable from menu)
 
 Routing:
   profile [name]    Show or change routing profile. Without args: print
@@ -96,6 +97,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdStatus(ctx)
 	case "menu":
 		return cmdMenu(ctx)
+	case "menu-profiles":
+		return cmdMenuProfiles(ctx)
 	case "connect":
 		return cmdConnect(ctx)
 	case "disconnect":
