@@ -22,7 +22,21 @@ ExecStart=/usr/bin/tun2socks \
     -mtu 1500
 
 # Поднимаем интерфейс и роуты после старта tun2socks.
-# Сохраняем старый default чтобы 10/8, 172.16/12, 192.168/16 шли мимо туннеля.
+#
+# fwmark 0x29a (== 666) — xraySOMark из cmd/xray-waybar-ctl/helpers.go.
+# xray в system_wide штампует SO_MARK=0x29a на каждый исходящий сокет.
+#
+# Маршрутизация:
+#   main:      host-routes из bypass-файла + RFC1918 + wlan0 +
+#              `default dev tun0 metric 1`  (tun0 побеждает по метрике).
+#   table 666: subnet wlan0 + `default via $GW dev $IF`  — НИКАКОГО tun0.
+#   ip rule:   `fwmark 0x29a lookup 666 pref 9` — помеченный xray-трафик
+#              никогда не видит tun0.
+#
+# Просто `lookup main` для отмеченного трафика не работает: main первым
+# вернёт tun0-default (метрика 1 ниже метрики wlan0). Отдельная таблица —
+# гарантия, что direct/freedom outbound xray не зацикливается через
+# tun0 → tun2socks → socks-in.
 ExecStartPost=/usr/bin/sh -c ' \
     set -e; \
     sleep 0.5; \
@@ -30,7 +44,8 @@ ExecStartPost=/usr/bin/sh -c ' \
     ip addr add 198.18.0.1/15 dev tun0 2>/dev/null || true; \
     GW=$(ip route show default | head -1 | awk "{print \\$3}"); \
     IF=$(ip route show default | head -1 | awk "{print \\$5}"); \
-    echo "$GW $IF" > /run/xray-waybar-tun.gateway; \
+    SUBNET=$(ip route show dev "$IF" scope link | head -1 | awk "{print \\$1}"); \
+    echo "$GW $IF $SUBNET" > /run/xray-waybar-tun.gateway; \
     : > /run/xray-waybar-tun.bypass-routes; \
     if [ -f /tmp/xray-waybar-bypass.txt ]; then \
         while read -r ip; do \
@@ -42,13 +57,20 @@ ExecStartPost=/usr/bin/sh -c ' \
     ip route add 10.0.0.0/8 via "$GW" dev "$IF" 2>/dev/null || true; \
     ip route add 172.16.0.0/12 via "$GW" dev "$IF" 2>/dev/null || true; \
     ip route add 192.168.0.0/16 via "$GW" dev "$IF" 2>/dev/null || true; \
+    ip route flush table 666 2>/dev/null || true; \
+    [ -n "$SUBNET" ] && ip route add "$SUBNET" dev "$IF" scope link table 666 2>/dev/null || true; \
+    ip route add default via "$GW" dev "$IF" table 666 2>/dev/null || true; \
+    ip rule del fwmark 0x29a 2>/dev/null || true; \
+    ip rule add fwmark 0x29a lookup 666 pref 9 2>/dev/null || true; \
     ip route add default dev tun0 metric 1 2>/dev/null || true; \
 '
 
 ExecStopPost=/usr/bin/sh -c ' \
     ip route del default dev tun0 metric 1 2>/dev/null || true; \
+    while ip rule del fwmark 0x29a 2>/dev/null; do :; done; \
+    ip route flush table 666 2>/dev/null || true; \
     if [ -f /run/xray-waybar-tun.gateway ]; then \
-        read GW IF < /run/xray-waybar-tun.gateway; \
+        read GW IF SUBNET < /run/xray-waybar-tun.gateway; \
         ip route del 10.0.0.0/8 via "$GW" dev "$IF" 2>/dev/null || true; \
         ip route del 172.16.0.0/12 via "$GW" dev "$IF" 2>/dev/null || true; \
         ip route del 192.168.0.0/16 via "$GW" dev "$IF" 2>/dev/null || true; \

@@ -43,6 +43,20 @@ func profileNeedsRules(profile string) bool {
 // looped back through the tunnel.
 const bypassFile = "/tmp/xray-waybar-bypass.txt"
 
+// xraySOMark is the SO_MARK every xray outbound stamps onto its
+// sockets in system_wide mode. The TUN unit installs
+// `ip rule add fwmark <xraySOMark> lookup main pref 9` so any packet
+// xray emits (proxy upstream *and* direct/freedom outbound) skips
+// `default dev tun0` and goes via the real interface. Without this,
+// xray accepts a tun2socks-delivered connection, routes it to the
+// direct outbound (anything matching e.g. geosite:category-ru in a
+// smart profile), freedom dials the original IP, that dial follows
+// the default route into tun0, lands back at socks-in, and the loop
+// runs the CPU and tun2socks netstack buffers into the floor.
+//
+// Must match the fwmark literal in configs/systemd/xray-waybar-tun.service.
+const xraySOMark = 0x29a
+
 // loadCtx is the bundle every command needs. It is reloaded per
 // invocation — the CLI is short-lived.
 type loadCtx struct {
@@ -125,6 +139,9 @@ func findServer(cache *store.Cache, name string) (server.Server, int, error) {
 func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 	profile := activeProfile(lc)
 	opts := xrayconfig.Options{SocksPort: lc.cfg.XrayPort}
+	if lc.cfg.SystemWide {
+		opts.SOMark = xraySOMark
+	}
 
 	switch {
 	case profile == "direct":
@@ -187,10 +204,17 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 	}
 
 	if lc.cfg.SystemWide {
-		if err := writeServerBypass(ctx, s, rules); err != nil {
+		if err := writeServerBypass(ctx, s, lc.cache, rules); err != nil {
 			fmt.Fprintf(os.Stderr, "warn: bypass IP write: %v\n", err)
 		}
-		if err := sysmode.Start(ctx); err != nil {
+		// Always Restart, never Start. `systemctl start` on an
+		// already-running unit is a no-op, so a switch-server `launch`
+		// would leave the route table holding the *previous* upstream's
+		// bypass entry — and the new upstream's IP routed through tun0,
+		// which is exactly the loop we just fixed for the freedom
+		// outbound. Restart forces ExecStartPost to re-read the bypass
+		// file and reinstall the fwmark rule.
+		if err := sysmode.Restart(ctx); err != nil {
 			// xray is already up — print the warning but don't undo it.
 			// The user can rerun `connect` after fixing the unit.
 			fmt.Fprintf(os.Stderr, "warn: system_wide tunnel did not start: %v\n", err)
@@ -255,28 +279,27 @@ func activeIndex(lc *loadCtx) int {
 // errNoServers is returned when no servers are cached.
 var errNoServers = errors.New("no servers in cache; run `xray-waybar-ctl update` first")
 
-// writeServerBypass resolves the upstream xray server to its IPv4
-// address(es) and writes them to bypassFile alongside well-known DNS
-// servers, any nameservers from /etc/resolv.conf, and any DNS server
-// IPs declared by the active routing rules (RemoteDNS / DomesticDNS).
+// writeServerBypass resolves the upstream xray server (plus every other
+// server in the cache) to IPv4 address(es) and writes them to bypassFile
+// alongside well-known DNS servers, /etc/resolv.conf nameservers, and
+// any DNS server IPs declared by the active routing rules.
 //
 // The TUN systemd unit reads this file on ExecStartPost and adds
-// host-routes so xray's own connection (and DNS) bypasses tun0.
-// Without this:
-//   - every packet xray emits gets looped back through the tunnel;
-//   - DNS-over-UDP doesn't survive REALITY (TCP-only), sites hang;
-//   - DNS servers from rules.json (e.g. 77.88.8.8 in smart profile)
-//     loop xray's resolver back through SOCKS5 → proxy outbound, which
-//     burns CPU and grows xray's connection buffers under IPIfNonMatch.
-func writeServerBypass(ctx context.Context, s server.Server, rules *routing.Rules) error {
-	ips, err := resolveServerIPs(ctx, s.Address)
-	if err != nil {
-		return err
-	}
-	if len(ips) == 0 {
-		return fmt.Errorf("no IPv4 addresses for %q", s.Address)
-	}
-	// dedup + DNS additions
+// host-routes via the real interface (not tun0).
+//
+// Why every server, not just the active one? Tester (`xray-waybar-ctl
+// test`) and pinger (the 30s timer) probe *all* cached upstreams over
+// plain TCP — without SO_MARK, since they're plain Go net.Dialer code
+// running outside xray. If the inactive upstream IPs aren't bypassed,
+// each probe lands in tun0 → tun2socks → socks-in → xray's proxy
+// outbound, hammers ephemeral ports, and grows tun2socks netstack
+// buffers until the watchdog or MemoryMax cuts it down. The list is
+// cheap (dozens of /32 host routes) and these IPs are VPN endpoints
+// the user is never browsing anyway.
+//
+// Active server's IP still appears too, of course — it's just no
+// longer special.
+func writeServerBypass(ctx context.Context, active server.Server, cache *store.Cache, rules *routing.Rules) error {
 	seen := map[string]struct{}{}
 	add := func(ip net.IP) {
 		if ip == nil {
@@ -288,8 +311,35 @@ func writeServerBypass(ctx context.Context, s server.Server, rules *routing.Rule
 		}
 		seen[v4.String()] = struct{}{}
 	}
+	// Active first (so failures here surface even if the cache walk
+	// silently skips a dead DNS lookup later).
+	ips, err := resolveServerIPs(ctx, active.Address)
+	if err != nil {
+		return err
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("no IPv4 addresses for %q", active.Address)
+	}
 	for _, ip := range ips {
 		add(ip)
+	}
+	// Every other cached server. Failures are non-fatal — pinger will
+	// just take the slow path through tun0 for that one host. The
+	// resolver call is local-DNS only and bounded by the parent ctx.
+	if cache != nil {
+		for _, s := range cache.Servers {
+			if s.Address == active.Address {
+				continue
+			}
+			rIPs, rErr := resolveServerIPs(ctx, s.Address)
+			if rErr != nil {
+				fmt.Fprintf(os.Stderr, "warn: bypass resolve %s: %v\n", s.Address, rErr)
+				continue
+			}
+			for _, ip := range rIPs {
+				add(ip)
+			}
+		}
 	}
 	// well-known public DNS — these don't reveal much (you'd query
 	// them either way) but their reachability lets browsers resolve

@@ -81,6 +81,17 @@ func emitWaybar(s waybar.Status) {
 }
 
 func cmdConnect(ctx context.Context) error {
+	// Block until any in-flight watchdog tick releases. Without this,
+	// `disconnect` followed by `connect` (or two `connect`s back-to-back)
+	// can race a watchdog tick that cached `state.Active` before our
+	// disconnect cleared it — leaving a phantom xray the user didn't
+	// ask for.
+	lock, err := acquireUserLock()
+	if err != nil {
+		return err
+	}
+	defer releaseWatchdogLock(lock)
+
 	lc, err := loadAll()
 	if err != nil {
 		return err
@@ -138,6 +149,17 @@ func cmdConnect(ctx context.Context) error {
 }
 
 func cmdDisconnect(ctx context.Context) error {
+	// See cmdConnect for the lock rationale. Critically here: without
+	// the lock, a watchdog tick that started a few ms before disconnect
+	// will still see `state.Active != nil` in its in-memory snapshot,
+	// observe the just-killed xray as unhealthy, and reconnect — making
+	// disconnect look broken to the user ("включается обратно").
+	lock, err := acquireUserLock()
+	if err != nil {
+		return err
+	}
+	defer releaseWatchdogLock(lock)
+
 	lc, err := loadAll()
 	if err != nil {
 		return err
@@ -228,6 +250,22 @@ func cmdTest(ctx context.Context) error {
 	if len(lc.cache.Servers) == 0 {
 		return errNoServers
 	}
+	// Tear down TUN before testing: the test xray instances dial
+	// upstream servers as plain net traffic from this process. With
+	// TUN up and SOMark on the main xray only, the test connections
+	// fall through to tun0 → tun2socks → socks-in → main xray → ...
+	// which floods ephemeral ports and falsifies the measurement
+	// (we'd be timing main xray's proxy outbound, not the test
+	// server). Same precaution cmdConnect takes.
+	tunWasUp := false
+	if lc.cfg.SystemWide {
+		if state, _ := sysmode.Status(ctx); state == sysmode.StateActive {
+			tunWasUp = true
+		}
+		if err := sysmode.Stop(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: stop tunnel before test: %v\n", err)
+		}
+	}
 	results := tester.Test(ctx, lc.cache.Servers, tester.Options{
 		XrayBin:     lc.cfg.XrayBin,
 		TestURL:     lc.cfg.TestURL,
@@ -235,6 +273,11 @@ func cmdTest(ctx context.Context) error {
 		Concurrency: lc.cfg.TestConcurrency,
 		StartPort:   lc.cfg.XrayPort + 100,
 	})
+	if tunWasUp {
+		if err := sysmode.Start(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: restart tunnel after test: %v\n", err)
+		}
+	}
 	saveResults(lc, results)
 
 	tester.SortByLatency(results)
@@ -255,6 +298,12 @@ func cmdTest(ctx context.Context) error {
 }
 
 func cmdUse(ctx context.Context, name string) error {
+	lock, err := acquireUserLock()
+	if err != nil {
+		return err
+	}
+	defer releaseWatchdogLock(lock)
+
 	lc, err := loadAll()
 	if err != nil {
 		return err
@@ -272,6 +321,12 @@ func cmdUse(ctx context.Context, name string) error {
 // cmdUseDir picks the next/previous server relative to the active one.
 // If there is no active server, starts from the head of the list.
 func cmdUseDir(ctx context.Context, step int) error {
+	lock, err := acquireUserLock()
+	if err != nil {
+		return err
+	}
+	defer releaseWatchdogLock(lock)
+
 	lc, err := loadAll()
 	if err != nil {
 		return err

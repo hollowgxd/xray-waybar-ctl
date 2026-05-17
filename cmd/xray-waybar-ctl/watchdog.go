@@ -266,6 +266,24 @@ func acquireWatchdogLock() (*os.File, error) {
 	return f, nil
 }
 
+// acquireUserLock blocks until the watchdog lock is free, then holds it
+// for the duration of a user-driven command (connect / disconnect /
+// use*). Watchdog uses LOCK_NB and quietly skips its tick when the user
+// holds this — so a disconnect mid-tick won't get steamrolled by the
+// tail of a watchdog reconnect that started moments earlier with the
+// pre-disconnect state cached in memory.
+func acquireUserLock() (*os.File, error) {
+	f, err := os.OpenFile(watchdogLock, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 func releaseWatchdogLock(f *os.File) {
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	_ = f.Close()

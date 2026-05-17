@@ -18,6 +18,13 @@ import (
 //   - ForceAllDirect, when true, overrides Rules entirely and routes
 //     every connection through the direct outbound. Used by the
 //     "direct" built-in profile.
+//   - SOMark, when non-zero, stamps every outbound's sockets with
+//     SO_MARK=SOMark. Pairs with an `ip rule fwmark … lookup main`
+//     installed by the TUN unit: without it, xray's direct/freedom
+//     outbound dials its destination through the default route, which
+//     in system_wide mode is tun0 → tun2socks → socks-in, and forms a
+//     feedback loop that pegs CPU and OOMKills tun2socks. Leave at 0
+//     when system_wide is off — the mark is harmless but pointless.
 //
 // The tester always passes nil Rules + ForceAllDirect=false so missing
 // geoip.dat / rules.json never breaks a benchmark.
@@ -26,6 +33,7 @@ type Options struct {
 	LogLevel       string
 	Rules          *routing.Rules
 	ForceAllDirect bool
+	SOMark         int
 }
 
 // Generate renders a complete xray-core config that routes a local
@@ -44,6 +52,12 @@ func Generate(s server.Server, opts Options) ([]byte, error) {
 	proxy, err := buildProxyOutbound(s)
 	if err != nil {
 		return nil, err
+	}
+	if opts.SOMark != 0 {
+		if proxy.StreamSettings == nil {
+			proxy.StreamSettings = &StreamSettings{}
+		}
+		proxy.StreamSettings.Sockopt = &Sockopt{Mark: opts.SOMark}
 	}
 	socksSettings, _ := json.Marshal(socksInboundSettings{Auth: "noauth", UDP: true})
 
@@ -68,8 +82,8 @@ func Generate(s server.Server, opts Options) ([]byte, error) {
 		}},
 		Outbounds: []Outbound{
 			proxy,
-			{Tag: "direct", Protocol: "freedom"},
-			{Tag: "block", Protocol: "blackhole"},
+			{Tag: "direct", Protocol: "freedom", StreamSettings: sockoptStream(opts.SOMark)},
+			{Tag: "block", Protocol: "blackhole", StreamSettings: sockoptStream(opts.SOMark)},
 		},
 		Routing: Routing{
 			DomainStrategy: domainStrategy,
@@ -319,4 +333,14 @@ func defaultStr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// sockoptStream wraps SO_MARK into a minimal StreamSettings for outbounds
+// (direct, block) that otherwise need no streamSettings. Returns nil for
+// mark=0 so the JSON stays clean when system_wide is off.
+func sockoptStream(mark int) *StreamSettings {
+	if mark == 0 {
+		return nil
+	}
+	return &StreamSettings{Sockopt: &Sockopt{Mark: mark}}
 }

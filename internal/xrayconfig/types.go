@@ -59,13 +59,24 @@ type Outbound struct {
 }
 
 type StreamSettings struct {
-	Network         string           `json:"network"`
+	Network         string           `json:"network,omitempty"`
 	Security        string           `json:"security,omitempty"`
 	TLSSettings     *TLSSettings     `json:"tlsSettings,omitempty"`
 	RealitySettings *RealitySettings `json:"realitySettings,omitempty"`
 	TCPSettings     *TCPSettings     `json:"tcpSettings,omitempty"`
 	WSSettings      *WSSettings      `json:"wsSettings,omitempty"`
 	GRPCSettings    *GRPCSettings    `json:"grpcSettings,omitempty"`
+	Sockopt         *Sockopt         `json:"sockopt,omitempty"`
+}
+
+// Sockopt carries socket-level options applied to every connection an
+// outbound opens. We only use SO_MARK today: in system_wide mode every
+// outbound (proxy, direct, block) marks its packets so an `ip rule
+// fwmark … lookup main` skips them past tun0 and prevents the loop
+// where xray's own direct/freedom outbound feeds back through tun2socks
+// into socks-in.
+type Sockopt struct {
+	Mark int `json:"mark,omitempty"`
 }
 
 type TLSSettings struct {

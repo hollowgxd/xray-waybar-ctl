@@ -101,6 +101,24 @@ func Stop(ctx context.Context) error {
 	return nil
 }
 
+// Restart cycles the TUN service. `systemctl start` on an
+// already-running unit is a no-op, which means a switch-server
+// `launch` would never re-run ExecStartPost — leaving the route table
+// pointing at the previous upstream's bypass entry and the new
+// upstream's IP routed through tun0 instead. Restart guarantees
+// ExecStartPost re-reads /tmp/xray-waybar-bypass.txt and reinstalls
+// the fwmark rule.
+func Restart(ctx context.Context) error {
+	if _, err := Status(ctx); errors.Is(err, ErrNotInstalled) {
+		return err
+	}
+	out, err := run(ctx, "systemctl", "restart", UnitName)
+	if err != nil {
+		return fmt.Errorf("sysmode: restart %s: %w (%s)", UnitName, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
 func run(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()

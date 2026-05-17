@@ -105,3 +105,60 @@ func TestGenerate_RequiresSocksPort(t *testing.T) {
 		t.Fatal("expected error without SocksPort")
 	}
 }
+
+// TestGenerate_SOMarkStampsAllOutbounds verifies that when SOMark is set,
+// every outbound (proxy, direct, block) carries streamSettings.sockopt.mark.
+// Missing it on direct breaks the system_wide loop fix.
+func TestGenerate_SOMarkStampsAllOutbounds(t *testing.T) {
+	s := server.Server{
+		Protocol: "vless", Address: "1.2.3.4", Port: 443,
+		UUID: "u", Network: "tcp", Security: "reality",
+		PublicKey: "PK", SNI: "x.example",
+	}
+	raw, err := Generate(s, Options{SocksPort: 1080, SOMark: 0x29a})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var parsed struct {
+		Outbounds []struct {
+			Tag            string `json:"tag"`
+			StreamSettings struct {
+				Sockopt *struct {
+					Mark int `json:"mark"`
+				} `json:"sockopt"`
+			} `json:"streamSettings"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(parsed.Outbounds) != 3 {
+		t.Fatalf("expected 3 outbounds, got %d", len(parsed.Outbounds))
+	}
+	for _, ob := range parsed.Outbounds {
+		if ob.StreamSettings.Sockopt == nil {
+			t.Errorf("outbound %q: missing sockopt", ob.Tag)
+			continue
+		}
+		if ob.StreamSettings.Sockopt.Mark != 0x29a {
+			t.Errorf("outbound %q: mark=%#x want 0x29a", ob.Tag, ob.StreamSettings.Sockopt.Mark)
+		}
+	}
+}
+
+// TestGenerate_NoSOMark_NoSockopt verifies that when SOMark is zero, no
+// sockopt block leaks into the rendered JSON — system_wide=false users
+// shouldn't see this.
+func TestGenerate_NoSOMark_NoSockopt(t *testing.T) {
+	s := server.Server{
+		Protocol: "trojan", Address: "1.2.3.4", Port: 443,
+		Password: "p", Network: "tcp",
+	}
+	raw, err := Generate(s, Options{SocksPort: 1080})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if strings.Contains(string(raw), `"sockopt"`) {
+		t.Errorf("expected no sockopt without SOMark; got:\n%s", raw)
+	}
+}

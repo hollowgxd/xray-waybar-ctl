@@ -25,9 +25,17 @@ install-system:
 	fi
 	install -Dm644 configs/systemd/xray-waybar-tun.service /etc/systemd/system/xray-waybar-tun.service
 	install -Dm644 configs/polkit/50-xray-waybar.rules /etc/polkit-1/rules.d/50-xray-waybar.rules
+	install -Dm644 configs/pacman/xray-waybar.hook /etc/pacman.d/hooks/xray-waybar.hook
+	# xray needs CAP_NET_ADMIN to setsockopt(SO_MARK) on its outbounds.
+	# Without it the freedom (direct) outbound dials with no mark,
+	# falls into `default dev tun0`, loops back through tun2socks into
+	# socks-in and burns CPU. Apply now; the pacman hook above
+	# reapplies after every xray upgrade so it survives `pacman -Syu`.
+	setcap cap_net_admin+ep /usr/bin/xray
 	systemctl daemon-reload
 	@echo
-	@echo "✓ systemd unit and polkit rule installed."
+	@echo "✓ systemd unit, polkit rule, pacman hook installed."
+	@echo "✓ cap_net_admin set on /usr/bin/xray (auto-reapplied on upgrade)."
 	@echo "  Make sure tun2socks is on PATH: pacman -Qi tun2socks"
 	@echo "  Add `system_wide: true` to ~/.config/xray-waybar/app.yaml,"
 	@echo "  ensure your user is in the `wheel` group, then:"
@@ -74,7 +82,11 @@ uninstall-system:
 	systemctl stop xray-waybar-tun.service 2>/dev/null || true
 	rm -f /etc/systemd/system/xray-waybar-tun.service
 	rm -f /etc/polkit-1/rules.d/50-xray-waybar.rules
+	rm -f /etc/pacman.d/hooks/xray-waybar.hook
 	rm -rf /etc/xray-waybar
+	# Drop the capability so an uninstalled xray-waybar leaves no
+	# unexpected privilege on the xray binary.
+	-setcap -r /usr/bin/xray 2>/dev/null
 	systemctl daemon-reload
 
 test:
