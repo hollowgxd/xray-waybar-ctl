@@ -26,6 +26,10 @@ install-system:
 	install -Dm644 configs/systemd/xray-waybar-tun.service /etc/systemd/system/xray-waybar-tun.service
 	install -Dm644 configs/polkit/50-xray-waybar.rules /etc/polkit-1/rules.d/50-xray-waybar.rules
 	install -Dm644 configs/pacman/xray-waybar.hook /etc/pacman.d/hooks/xray-waybar.hook
+	# Suspend/resume is handled by the watchdog daemon talking to
+	# logind over D-Bus (see internal/sleepwatch). Nothing to install
+	# for the system-sleep path anymore — that machinery moved
+	# entirely into the user-session watchdog.
 	# xray needs CAP_NET_ADMIN to setsockopt(SO_MARK) on its outbounds.
 	# Without it the freedom (direct) outbound dials with no mark,
 	# falls into `default dev tun0`, loops back through tun2socks into
@@ -73,6 +77,9 @@ uninstall-monitor:
 	rm -f $(HOME)/.config/systemd/user/xray-waybar-watchdog.service
 	rm -f $(HOME)/.config/systemd/user/xray-waybar-geo.timer
 	rm -f $(HOME)/.config/systemd/user/xray-waybar-geo.service
+	# Drop the legacy resume helper unit if a previous install put it
+	# here. The watchdog now owns suspend/resume directly.
+	rm -f $(HOME)/.config/systemd/user/xray-waybar-resume.service
 	systemctl --user daemon-reload
 
 uninstall-system:
@@ -83,6 +90,10 @@ uninstall-system:
 	rm -f /etc/systemd/system/xray-waybar-tun.service
 	rm -f /etc/polkit-1/rules.d/50-xray-waybar.rules
 	rm -f /etc/pacman.d/hooks/xray-waybar.hook
+	# Legacy: previous installs dropped a system-sleep hook here.
+	# The watchdog daemon now owns suspend/resume — remove the
+	# stale hook so it can't conflict.
+	rm -f /usr/lib/systemd/system-sleep/xray-waybar
 	rm -rf /etc/xray-waybar
 	# Drop the capability so an uninstalled xray-waybar leaves no
 	# unexpected privilege on the xray binary.

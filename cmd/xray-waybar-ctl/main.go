@@ -47,7 +47,10 @@ Servers:
   list              Show cached servers
   test              URL-test every cached server, print latency table
   ping              TCP-only liveness check (cheap; used by systemd timer)
-  watchdog [--loop D]  Detect a dead/stuck xray and auto-reconnect.
+  watchdog [--loop D]  Detect a dead/stuck xray and auto-reconnect. Also owns
+                       suspend/resume: subscribes to logind PrepareForSleep
+                       and cleanly stops xray before suspend, reconnects on
+                       resume.
                        Without --loop: one tick (manual use).
                        --loop 10s: daemon mode (used by systemd user service).
   use <name>        Connect to a specific server (by fragment name)

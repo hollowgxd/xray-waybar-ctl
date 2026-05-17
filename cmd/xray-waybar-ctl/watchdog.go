@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/yourgfslove/xray-waybar-ctl/internal/process"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/server"
+	"github.com/yourgfslove/xray-waybar-ctl/internal/sleepwatch"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/store"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/sysmode"
 	"github.com/yourgfslove/xray-waybar-ctl/internal/tester"
@@ -31,6 +34,13 @@ const watchdogMaxAttempts = 3
 // Long enough to ride out a brief CPU spike, short enough that a stuck
 // xray gets detected within one tick.
 const xrayProbeTimeout = 500 * time.Millisecond
+
+// resumeRouteWait bounds how long we wait for a default route to
+// appear after the system resumes. NetworkManager usually
+// re-associates wifi in 1–3 seconds; 10s leaves headroom for a slow
+// roam without making the watchdog look hung if the network never
+// comes back.
+const resumeRouteWait = 10 * time.Second
 
 // cmdWatchdog runs the auto-reconnect watchdog.
 //
@@ -53,6 +63,24 @@ func cmdWatchdog(ctx context.Context, args []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "watchdog: looping every %s\n", interval)
+
+	// Subscribe to logind PrepareForSleep. We do this best-effort: if
+	// it fails (no logind, no system bus, broken D-Bus) the watchdog
+	// still runs as a pure poll loop — the 10s tick is the original
+	// safety net and stays in place. The D-Bus path is just the
+	// "react immediately" optimization that also lets us shut xray
+	// down *before* the kernel freezes its sockets, so resume never
+	// has stale state to clean up in the first place.
+	var sleepEvents <-chan sleepwatch.Event
+	sw, err := sleepwatch.Connect(ctx, "xray-waybar-ctl", "Cleanly stop xray before suspend; reconnect on resume")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: sleepwatch unavailable, polling only: %v\n", err)
+	} else {
+		defer sw.Close()
+		sleepEvents = sw.Events()
+		fmt.Fprintln(os.Stderr, "watchdog: subscribed to logind PrepareForSleep")
+	}
+
 	// Run one tick immediately so a fresh start doesn't have to wait
 	// `interval` before noticing a dead xray inherited from a previous
 	// session.
@@ -68,6 +96,22 @@ func cmdWatchdog(ctx context.Context, args []string) error {
 		case <-t.C:
 			if err := watchdogTick(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(os.Stderr, "watchdog: tick failed: %v\n", err)
+			}
+		case ev, ok := <-sleepEvents:
+			if !ok {
+				// Dispatcher exited (ctx cancel or connection drop).
+				// Disable the case so the select doesn't spin on a
+				// closed channel; keep polling.
+				sleepEvents = nil
+				continue
+			}
+			if ev.Pre {
+				handlePreSuspend(ctx)
+				// Always release, even if handler bailed early —
+				// otherwise logind waits the full 5s for nothing.
+				ev.Done()
+			} else {
+				handlePostResume(ctx)
 			}
 		}
 	}
@@ -287,4 +331,171 @@ func acquireUserLock() (*os.File, error) {
 func releaseWatchdogLock(f *os.File) {
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	_ = f.Close()
+}
+
+// handlePreSuspend stops xray + TUN cleanly while logind is holding
+// the rest of the suspend chain on our delay inhibitor. The window
+// is short (InhibitDelayMaxSec, default 5s) so we keep the work
+// bounded: a 2-second SIGTERM grace on xray, no retries.
+//
+// Critically: we do NOT clear state.Active. The post-resume handler
+// reads it as "we were connected; reconnect to this server". That's
+// the whole point of doing pre-suspend cleanup — we tear xray down
+// *with* the knowledge that we'll bring the same target back up on
+// the other side.
+func handlePreSuspend(ctx context.Context) {
+	// Blocking flock: a user-initiated command (connect/disconnect/use)
+	// in flight should finish first, otherwise pre-suspend cleanup
+	// races against a half-applied state transition. The wait is
+	// bounded by logind's InhibitDelayMaxSec; if the user command
+	// somehow takes longer, suspend proceeds without our cleanup and
+	// the watchdog tick + post-resume reconnect picks up the pieces.
+	lock, err := acquireUserLock()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: pre-suspend lock: %v\n", err)
+		return
+	}
+	defer releaseWatchdogLock(lock)
+
+	lc, err := loadAll()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: pre-suspend load: %v\n", err)
+		return
+	}
+	if lc.state.Active == nil {
+		// Not connected; nothing to tear down.
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "watchdog: pre-suspend cleanup (active=%s)\n", lc.state.Active.Name)
+	if lc.cfg.SystemWide {
+		if err := sysmode.Stop(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "watchdog: pre-suspend sysmode.Stop: %v\n", err)
+		}
+	}
+	if err := process.Stop(lc.cfg.PIDFile, 2*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: pre-suspend process.Stop: %v\n", err)
+	}
+}
+
+// handlePostResume relaunches xray + TUN onto the server that was
+// active before suspend. Skipped if state.Active was cleared (either
+// the user disconnected before suspend, or watchdog gave up earlier).
+//
+// We wait for a default route first because the subscription cache
+// is already loaded by launch() — but launch() itself doesn't fetch
+// anything, so the only thing it needs from the network is xray's
+// connection to upstream. Still, with no route the relaunch races
+// against NetworkManager re-associating wifi and the TCP probe
+// inside process.Start tends to fail, so we wait the route in.
+func handlePostResume(ctx context.Context) {
+	lock, err := acquireUserLock()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: post-resume lock: %v\n", err)
+		return
+	}
+	defer releaseWatchdogLock(lock)
+
+	lc, err := loadAll()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: post-resume load: %v\n", err)
+		return
+	}
+	if lc.state.Active == nil {
+		// User disconnected before suspend, or the previous suspend's
+		// pre-handler crashed before we could record the active
+		// target. Either way: stay disconnected, mirror the existing
+		// behavior where a sleeping disconnected laptop stays that
+		// way.
+		return
+	}
+
+	if !waitDefaultRoute(ctx, resumeRouteWait) {
+		fmt.Fprintf(os.Stderr, "watchdog: post-resume no default route after %s; deferring to next tick\n", resumeRouteWait)
+		return
+	}
+
+	// Reset the failure budget on a fresh resume: the pre-suspend
+	// counter is irrelevant to the post-resume world.
+	lc.state.WatchdogAttempts = 0
+
+	target := *lc.state.Active
+	// If the cached server vanished (subscription refreshed during
+	// the previous session, name changed), fall through to the
+	// existing recovery picker.
+	if _, _, err := findServer(lc.cache, target.Name); err != nil {
+		pick, ok := pickRecoveryTarget(lc)
+		if !ok {
+			fmt.Fprintln(os.Stderr, "watchdog: post-resume no live target; clearing active")
+			lc.state.Active = nil
+			lc.state.ConnectedAt = time.Time{}
+			_ = store.SaveState(lc.cfg.StateFile, lc.state)
+			return
+		}
+		target = pick
+	}
+
+	fmt.Fprintf(os.Stderr, "watchdog: post-resume reconnecting to %s\n", target.Name)
+	if err := launch(ctx, lc, target); err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: post-resume launch: %v\n", err)
+		// Don't bump WatchdogAttempts here — the regular tick loop
+		// will detect the unhealthy state on its next pass and
+		// run the normal failure-budget path.
+	}
+}
+
+// waitDefaultRoute polls /proc/net/route once a second for at most
+// d, returning true as soon as an IPv4 default route exists. Reading
+// /proc directly avoids forking `ip route` every tick.
+//
+// The /proc/net/route format is tab-separated; the destination field
+// is the 2nd column in hex little-endian. A default route is dest
+// 00000000 with flags & 0x1 (RTF_UP) set.
+func waitDefaultRoute(ctx context.Context, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if hasDefaultRoute() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func hasDefaultRoute() bool {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	// Skip header.
+	if !sc.Scan() {
+		return false
+	}
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 4 {
+			continue
+		}
+		// Destination column == "00000000" means default.
+		if fields[1] != "00000000" {
+			continue
+		}
+		// Flags column (4th) — RTF_UP is bit 0x1.
+		var flags uint64
+		if _, err := fmt.Sscanf(fields[3], "%X", &flags); err != nil {
+			continue
+		}
+		if flags&0x1 != 0 {
+			return true
+		}
+	}
+	return false
 }
