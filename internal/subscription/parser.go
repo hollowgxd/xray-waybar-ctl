@@ -18,6 +18,9 @@ import (
 // HTTP endpoint) into a list of servers. Lines that fail to parse are
 // skipped; their errors are returned alongside the successful entries.
 func Parse(body []byte) ([]server.Server, []error) {
+	if isClashYAML(body) {
+		return parseClash(body)
+	}
 	decoded := decodeBase64Loose(string(body))
 	lines := strings.Split(string(decoded), "\n")
 

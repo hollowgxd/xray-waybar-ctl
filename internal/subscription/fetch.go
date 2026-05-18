@@ -14,7 +14,12 @@ const FetchTimeout = 15 * time.Second
 // Fetch downloads the raw subscription body. The caller is expected to
 // pass the body to Parse — fetch and parse are split so a stale cache
 // can be served when the network is unreachable.
-func Fetch(ctx context.Context, rawURL string) ([]byte, error) {
+//
+// hwid, when non-empty, is sent as the X-HWID header. Remnawave-style
+// panels gate the real server list behind this; without it the panel
+// returns a placeholder URI pointing at 0.0.0.0:1 with an instructional
+// fragment, which would silently produce a broken cache.
+func Fetch(ctx context.Context, rawURL, hwid string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, FetchTimeout)
 	defer cancel()
 
@@ -25,6 +30,9 @@ func Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	// Most subscription endpoints care about the User-Agent and refuse
 	// generic Go clients with a 403.
 	req.Header.Set("User-Agent", "xray-waybar-ctl/1.0")
+	if hwid != "" {
+		req.Header.Set("X-HWID", hwid)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

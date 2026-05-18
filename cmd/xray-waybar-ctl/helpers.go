@@ -99,7 +99,14 @@ func ensureFreshCache(ctx context.Context, lc *loadCtx, force bool) error {
 	if !stale {
 		return nil
 	}
-	body, err := subscription.Fetch(ctx, lc.cfg.SubscriptionURL)
+	hwid, err := subscription.LoadOrCreateHWID(lc.cfg.HWIDFile)
+	if err != nil {
+		// Don't fail the whole fetch — a panel that doesn't gate on HWID
+		// will still hand us real servers. Just warn so the user can
+		// spot a permission problem.
+		fmt.Fprintf(os.Stderr, "warn: hwid: %v\n", err)
+	}
+	body, err := subscription.Fetch(ctx, lc.cfg.SubscriptionURL, hwid)
 	if err != nil {
 		// keep the stale cache if we have one — partial connectivity
 		// shouldn't break a `connect` that worked yesterday.

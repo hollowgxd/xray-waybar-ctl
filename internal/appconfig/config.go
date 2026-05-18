@@ -37,6 +37,7 @@ type Config struct {
 	LogFile   string `yaml:"log_file"`
 	CacheFile string `yaml:"cache_file"`
 	StateFile string `yaml:"state_file"`
+	HWIDFile  string `yaml:"hwid_file"`
 
 	// SystemWide enables the TUN sidecar (hev-socks5-tunnel via the
 	// xray-waybar-tun.service systemd unit). When true, `connect` will
@@ -187,6 +188,7 @@ func defaults() *Config {
 		LogFile:                 "~/.local/share/xray-waybar/xray.log",
 		CacheFile:               "~/.cache/xray-waybar/servers.json",
 		StateFile:               "~/.cache/xray-waybar/state.json",
+		HWIDFile:                "~/.local/share/xray-waybar/hwid",
 		RoutingProfile:          "proxy-all",
 		Geo: GeoConfig{
 			Dir: "~/.local/share/xray-waybar",
@@ -210,7 +212,7 @@ func (c *Config) normalize() error {
 	c.SubscriptionUpdateInterval = time.Duration(c.SubscriptionIntervalSec) * time.Second
 
 	var err error
-	for _, p := range []*string{&c.XrayConfig, &c.PIDFile, &c.LogFile, &c.CacheFile, &c.StateFile, &c.XrayBin, &c.Geo.Dir} {
+	for _, p := range []*string{&c.XrayConfig, &c.PIDFile, &c.LogFile, &c.CacheFile, &c.StateFile, &c.HWIDFile, &c.XrayBin, &c.Geo.Dir} {
 		*p, err = expand(*p)
 		if err != nil {
 			return err
