@@ -16,13 +16,53 @@ CLI на Go, который управляет `xray-core` и отдаёт ст�
 
 ## Установка
 
-```sh
-# зависимости
-yay -S xray waybar
+Нужно поставить:
 
-# сборка и установка в ~/.local
+- `xray-core` — основной демон
+- `waybar` — куда выводится статус
+- `walker` — dmenu-лаунчер для встроенного меню переключения серверов
+  (`xray-waybar-ctl menu`)
+- Go ≥ 1.21 — для сборки
+- `tun2socks` — только если планируется `system_wide: true`
+
+На Arch это всё в `pacman`/AUR (`yay -S xray waybar walker-bin tun2socks go`).
+На Debian/Ubuntu/Fedora — штатный пакетный менеджер; `walker` и `tun2socks`
+если в репах нет, берутся из релизов:
+<https://github.com/abenz1267/walker>,
+<https://github.com/xjasonlyu/tun2socks/releases>.
+
+```sh
 make install
 ```
+
+`make install` кладёт бинарь в `~/.local/bin/xray-waybar-ctl` и пример конфига
+в `~/.local/share/xray-waybar/app.yaml.example`. Убедись, что `~/.local/bin`
+есть в `$PATH`.
+
+### Что предполагает проект
+
+- **systemd как init** — мониторинг и TUN-сайдкар поднимаются через
+  systemd-юниты (user-session и system). Без systemd `make install-monitor`
+  и `make install-system` не сработают; основной `connect/disconnect`
+  будет работать, но без автореконнекта и без TUN.
+- **logind на system D-Bus** — watchdog ловит `PrepareForSleep` от
+  `org.freedesktop.login1` для tear-down/resume. На системах без logind
+  (runit/OpenRC) suspend/resume в watchdog'е молча отключится, тики по
+  таймеру остаются.
+- **polkit + группа `wheel`** — нужны только для `system_wide: true`,
+  чтобы юзер мог поднимать `xray-waybar-tun.service` без пароля
+  (`configs/polkit/50-xray-waybar.rules`). На дистрибутивах, где
+  административная группа называется иначе (`sudo` в Debian),
+  отредактируй правило либо добавь себя в `wheel`:
+  `sudo groupadd -f wheel && sudo usermod -aG wheel "$USER"`.
+- **nerd-font на панели** — иконки в `internal/waybar` это
+  нерд-глифы. Если у тебя нет нерд-шрифта, в Waybar будут квадратики
+  — поставь любой nerd-font и пропиши его в `font-family` стиля
+  модуля.
+- **pacman-хук** (`configs/pacman/xray-waybar.hook`) реприменяет
+  `cap_net_admin` на `/usr/bin/xray` после `pacman -Syu`. На не-Arch
+  дистрибутивах хук не сработает — после обновления xray руками:
+  `sudo setcap cap_net_admin+ep /usr/bin/xray`.
 
 ## Конфигурация
 
@@ -36,6 +76,15 @@ $EDITOR ~/.config/xray-waybar/app.yaml
 
 Минимально нужен только `subscription_url`. Все остальные поля имеют разумные дефолты —
 см. `configs/app.yaml.example`.
+
+Если `routing_profile` не `proxy-all` / `direct` — один раз нужно скачать
+geoip/geosite, иначе xray откажется стартовать:
+
+```sh
+xray-waybar-ctl update-geo
+```
+
+Дальше это делает таймер `xray-waybar-geo.timer` из `make install-monitor`.
 
 ## Использование
 
@@ -58,7 +107,19 @@ xray-waybar-ctl status      # JSON для Waybar
 
 ```sh
 yay -S tun2socks            # gVisor-based, лежит в AUR
-sudo make install-system    # systemd unit + polkit rule
+sudo make install-system    # systemd unit + polkit rule + pacman hook
+```
+
+`install-system` ставит:
+- `xray-waybar-tun.service` (systemd unit для tun2socks)
+- polkit-правило, разрешающее членам группы `wheel` поднимать/гасить именно этот unit без пароля
+- pacman-хук, который реприменяет `cap_net_admin` на `/usr/bin/xray` после каждого `pacman -Syu`
+
+Пользователь должен быть в группе `wheel` — иначе polkit откажет и `connect`
+не сможет поднять TUN:
+
+```sh
+groups | grep -q wheel || sudo usermod -aG wheel "$USER"   # перелогиниться
 ```
 
 В `~/.config/xray-waybar/app.yaml`:
@@ -87,6 +148,45 @@ ip route                                # должен быть `default dev tun
 curl https://ifconfig.me                # IP сервера, не твой
 curl http://10.0.0.1                    # идёт напрямую (если этот хост у тебя есть)
 ```
+
+## Мониторинг и автореконнект
+
+```sh
+make install-monitor
+```
+
+Ставит и включает три user-юнита:
+
+- `xray-waybar-ping.timer` — раз в 30s гоняет ping-батч, чтобы тултип и
+  меню walker показывали актуальные латентности.
+- `xray-waybar-watchdog.service` — long-lived демон с внутренним 10s
+  loop. Ловит две вещи: (1) xray умер за tun2socks → автореконнект,
+  (2) система проснулась после suspend → tear down + reconnect через
+  D-Bus signal `PrepareForSleep` от logind.
+- `xray-waybar-geo.timer` — раз в сутки обновляет `geoip.dat` /
+  `geosite.dat` из `roscomvpn-geo*` GitHub Releases.
+
+Снять: `make uninstall-monitor`.
+
+Логи watchdog'а:
+
+```sh
+systemctl --user status xray-waybar-watchdog.service
+journalctl --user -u xray-waybar-watchdog.service -f
+```
+
+## Меню переключения
+
+Команда `xray-waybar-ctl menu` поднимает `walker --dmenu` со списком
+серверов; первой строкой — текущий профиль. Выбор сервера → `use`,
+выбор `Profile: …` → второй walker с вариантами `routing_profile`
+(proxy-all / direct / smart / whitelist / custom URL). Запись идёт в
+`state.json` и перебивает значение из `app.yaml` до
+`xray-waybar-ctl profile reset`.
+
+Биндить на хоткей оконного менеджера или на `on-click` модуля Waybar.
+`walker` должен быть в `$PATH` — иначе `menu` вернёт ошибку, остальной
+CLI работает.
 
 ## Waybar
 
