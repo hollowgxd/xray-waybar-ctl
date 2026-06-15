@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -25,10 +26,18 @@ import (
 const watchdogLock = "/tmp/xray-waybar-watchdog.lock"
 
 // watchdogMaxAttempts is the consecutive-failure ceiling. Once crossed,
-// the watchdog clears state.Active so it stops trying — a broken
-// subscription or a permanently down upstream shouldn't burn CPU
-// relaunching xray every 10 seconds forever.
+// the watchdog pauses (sets state.WatchdogPausedUntil = now + cooldown)
+// so a broken subscription or a permanently down upstream doesn't burn
+// CPU relaunching xray every 10 seconds forever.
 const watchdogMaxAttempts = 3
+
+// watchdogPauseCooldown is how long ticks are skipped after the watchdog
+// gives up a burst of reconnect attempts. Long enough that we don't burn
+// CPU on a hopeless upstream, short enough that recovery is automatic
+// once the network situation changes (NetworkManager reassociation, the
+// user moving between APs, the upstream coming back). state.Active is
+// preserved across the pause — the user's intent to be connected stays.
+const watchdogPauseCooldown = 5 * time.Minute
 
 // xrayProbeTimeout is how long we wait for the SOCKS5 port to respond.
 // Long enough to ride out a brief CPU spike, short enough that a stuck
@@ -89,10 +98,18 @@ func cmdWatchdog(ctx context.Context, args []string) error {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// Periodic memstats log. Cheap, and gives us a breadcrumb when the
+	// watchdog's heap grows unexpectedly (we've seen OOM kills at ~1.9G
+	// RSS before — when it happens again we want a timestamp anchor).
+	memTicker := time.NewTicker(5 * time.Minute)
+	defer memTicker.Stop()
+	logMemStats("start")
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-memTicker.C:
+			logMemStats("periodic")
 		case <-t.C:
 			if err := watchdogTick(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(os.Stderr, "watchdog: tick failed: %v\n", err)
@@ -106,15 +123,38 @@ func cmdWatchdog(ctx context.Context, args []string) error {
 				continue
 			}
 			if ev.Pre {
+				logMemStats("pre-suspend-begin")
 				handlePreSuspend(ctx)
 				// Always release, even if handler bailed early —
 				// otherwise logind waits the full 5s for nothing.
 				ev.Done()
+				logMemStats("pre-suspend-end")
 			} else {
+				logMemStats("post-resume-begin")
 				handlePostResume(ctx)
+				logMemStats("post-resume-end")
 			}
 		}
 	}
+}
+
+// logMemStats prints a one-line summary of the Go runtime's heap.
+// Cheap (no GC, no stop-the-world) — ReadMemStats is microseconds.
+// Logged at start, every 5 min, and around suspend/resume events so
+// we can correlate growth with code paths.
+func logMemStats(tag string) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	fmt.Fprintf(os.Stderr,
+		"watchdog: memstats(%s): alloc=%.1fM sys=%.1fM heap_inuse=%.1fM heap_idle=%.1fM goroutines=%d num_gc=%d\n",
+		tag,
+		float64(m.HeapAlloc)/1024/1024,
+		float64(m.Sys)/1024/1024,
+		float64(m.HeapInuse)/1024/1024,
+		float64(m.HeapIdle)/1024/1024,
+		runtime.NumGoroutine(),
+		m.NumGC,
+	)
 }
 
 // watchdogTick is one detect-and-recover cycle. Returns nil for the
@@ -153,10 +193,18 @@ func watchdogTick(ctx context.Context) error {
 	}
 
 	if xrayHealthy(lc.cfg.PIDFile, lc.cfg.XrayPort) {
-		if lc.state.WatchdogAttempts != 0 {
+		if lc.state.WatchdogAttempts != 0 || !lc.state.WatchdogPausedUntil.IsZero() {
 			lc.state.WatchdogAttempts = 0
+			lc.state.WatchdogPausedUntil = time.Time{}
 			_ = store.SaveState(lc.cfg.StateFile, lc.state)
 		}
+		return nil
+	}
+
+	// We're unhealthy AND in a cooldown window from a previous burst —
+	// skip silently so we don't spam reconnects on a hopeless upstream.
+	// Active is intact, so when the cooldown elapses we resume trying.
+	if !lc.state.WatchdogPausedUntil.IsZero() && time.Now().Before(lc.state.WatchdogPausedUntil) {
 		return nil
 	}
 
@@ -176,20 +224,21 @@ func watchdogTick(ctx context.Context) error {
 	}
 
 	if lc.state.WatchdogAttempts >= watchdogMaxAttempts {
-		fmt.Fprintf(os.Stderr, "watchdog: giving up after %d attempts; clearing active server\n",
-			lc.state.WatchdogAttempts)
-		lc.state.Active = nil
-		lc.state.ConnectedAt = time.Time{}
+		until := time.Now().Add(watchdogPauseCooldown)
+		fmt.Fprintf(os.Stderr, "watchdog: giving up after %d attempts; pausing reconnects until %s (active=%s preserved)\n",
+			lc.state.WatchdogAttempts, until.Format(time.RFC3339), lc.state.Active.Name)
 		lc.state.WatchdogAttempts = 0
+		lc.state.WatchdogPausedUntil = until
 		return store.SaveState(lc.cfg.StateFile, lc.state)
 	}
 
 	pick, ok := pickRecoveryTarget(lc)
 	if !ok {
-		fmt.Fprintln(os.Stderr, "watchdog: no alive server in last ping batch; clearing active")
-		lc.state.Active = nil
-		lc.state.ConnectedAt = time.Time{}
+		until := time.Now().Add(watchdogPauseCooldown)
+		fmt.Fprintf(os.Stderr, "watchdog: no alive server in last ping batch; pausing reconnects until %s (active=%s preserved)\n",
+			until.Format(time.RFC3339), lc.state.Active.Name)
 		lc.state.WatchdogAttempts = 0
+		lc.state.WatchdogPausedUntil = until
 		return store.SaveState(lc.cfg.StateFile, lc.state)
 	}
 
@@ -202,7 +251,11 @@ func watchdogTick(ctx context.Context) error {
 
 	fmt.Fprintf(os.Stderr, "watchdog: reconnecting to %s (attempt %d/%d)\n",
 		pick.Name, lc.state.WatchdogAttempts, watchdogMaxAttempts)
-	return launch(ctx, lc, pick)
+	// resetFailures=false: keep the just-incremented attempt counter so a
+	// server that opens its SOCKS port but immediately dies again climbs
+	// toward watchdogMaxAttempts instead of resetting every tick. The
+	// counter is only cleared by the healthy-probe branch above.
+	return launch(ctx, lc, pick, false)
 }
 
 // parseWatchdogArgs accepts `--loop <duration>` (or `--loop=<duration>`)
@@ -415,9 +468,11 @@ func handlePostResume(ctx context.Context) {
 		return
 	}
 
-	// Reset the failure budget on a fresh resume: the pre-suspend
-	// counter is irrelevant to the post-resume world.
+	// Reset failure budget *and* any prior pause on a fresh resume —
+	// the network situation is a brand-new world now and the user's
+	// intent (state.Active) is the only thing we want to carry over.
 	lc.state.WatchdogAttempts = 0
+	lc.state.WatchdogPausedUntil = time.Time{}
 
 	target := *lc.state.Active
 	// If the cached server vanished (subscription refreshed during
@@ -426,22 +481,44 @@ func handlePostResume(ctx context.Context) {
 	if _, _, err := findServer(lc.cache, target.Name); err != nil {
 		pick, ok := pickRecoveryTarget(lc)
 		if !ok {
-			fmt.Fprintln(os.Stderr, "watchdog: post-resume no live target; clearing active")
-			lc.state.Active = nil
-			lc.state.ConnectedAt = time.Time{}
+			until := time.Now().Add(watchdogPauseCooldown)
+			fmt.Fprintf(os.Stderr, "watchdog: post-resume no live target; pausing until %s (active=%s preserved)\n",
+				until.Format(time.RFC3339), lc.state.Active.Name)
+			lc.state.WatchdogPausedUntil = until
 			_ = store.SaveState(lc.cfg.StateFile, lc.state)
 			return
 		}
 		target = pick
 	}
 
-	fmt.Fprintf(os.Stderr, "watchdog: post-resume reconnecting to %s\n", target.Name)
-	if err := launch(ctx, lc, target); err != nil {
-		fmt.Fprintf(os.Stderr, "watchdog: post-resume launch: %v\n", err)
-		// Don't bump WatchdogAttempts here — the regular tick loop
-		// will detect the unhealthy state on its next pass and
-		// run the normal failure-budget path.
+	// Retry with backoff. Network can still be settling for several
+	// seconds after PrepareForSleep(false): wifi reassociation, DHCP
+	// renewals, upstream RST-pinging stale connections, etc. We're
+	// inside the user lock so no concurrent tick will fight us, and
+	// the backoff sequence (1+2+4+8+16=31s) stays comfortably under
+	// any user-perceived "VPN is just down forever" threshold.
+	backoff := []time.Duration{0, 1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
+	var lastErr error
+	for i, wait := range backoff {
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+		fmt.Fprintf(os.Stderr, "watchdog: post-resume reconnect attempt %d/%d to %s\n",
+			i+1, len(backoff), target.Name)
+		if err := launch(ctx, lc, target, true); err != nil {
+			lastErr = err
+			fmt.Fprintf(os.Stderr, "watchdog: post-resume launch failed: %v\n", err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "watchdog: post-resume reconnected to %s\n", target.Name)
+		return
 	}
+	fmt.Fprintf(os.Stderr, "watchdog: post-resume all %d attempts failed (last: %v); tick loop will continue retrying\n",
+		len(backoff), lastErr)
 }
 
 // waitDefaultRoute polls /proc/net/route once a second for at most

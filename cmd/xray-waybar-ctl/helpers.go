@@ -143,7 +143,17 @@ func findServer(cache *store.Cache, name string) (server.Server, int, error) {
 
 // launch swaps out xray onto the given server. It is the single place
 // that writes xray.json, stops the old process and starts the new one.
-func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
+//
+// resetFailures controls whether a successful launch clears the
+// watchdog's failure budget (WatchdogAttempts / WatchdogPausedUntil).
+// User-initiated launches (connect / reconnect / use-*) pass true: a
+// deliberate (re)connect is a fresh start and should re-arm the
+// watchdog. The watchdog's own reconnect attempts pass false — otherwise
+// the per-tick increment in watchdogTick is immediately undone here, the
+// give-up ceiling is never reached, and a server that opens its local
+// SOCKS port but can't actually carry traffic flaps forever. The only
+// automatic reset then lives in watchdogTick's healthy-probe branch.
+func launch(ctx context.Context, lc *loadCtx, s server.Server, resetFailures bool) error {
 	profile := activeProfile(lc)
 	opts := xrayconfig.Options{SocksPort: lc.cfg.XrayPort}
 	if lc.cfg.SystemWide {
@@ -231,6 +241,13 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server) error {
 	now := time.Now()
 	lc.state.Active = &s
 	lc.state.ConnectedAt = now
+	// Only a user-initiated launch invalidates the watchdog's failure
+	// budget. A watchdog-driven reconnect must leave WatchdogAttempts
+	// intact so repeated flaps accumulate toward the give-up ceiling.
+	if resetFailures {
+		lc.state.WatchdogAttempts = 0
+		lc.state.WatchdogPausedUntil = time.Time{}
+	}
 	return store.SaveState(lc.cfg.StateFile, lc.state)
 }
 

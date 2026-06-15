@@ -147,7 +147,7 @@ func cmdConnect(ctx context.Context) error {
 	}
 	picked := results[pickIdx]
 	fmt.Fprintf(os.Stderr, "connecting to %s (%dms)\n", picked.Server.DisplayName(), picked.Latency.Milliseconds())
-	return launch(ctx, lc, picked.Server)
+	return launch(ctx, lc, picked.Server, true)
 }
 
 func cmdDisconnect(ctx context.Context) error {
@@ -317,7 +317,7 @@ func cmdUse(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	return launch(ctx, lc, s)
+	return launch(ctx, lc, s, true)
 }
 
 // cmdUseDir picks the next/previous server relative to the active one.
@@ -345,7 +345,7 @@ func cmdUseDir(ctx context.Context, step int) error {
 	} else {
 		idx = (idx + step + len(lc.cache.Servers)) % len(lc.cache.Servers)
 	}
-	return launch(ctx, lc, lc.cache.Servers[idx])
+	return launch(ctx, lc, lc.cache.Servers[idx], true)
 }
 
 // cmdPing runs a TCP-level liveness check on every cached server and
@@ -614,8 +614,14 @@ func cmdUpdateGeo(ctx context.Context) error {
 		return nil
 	}
 	if running, _ := process.IsRunning(lc.cfg.PIDFile); running && profileNeedsRules(activeProfile(lc)) {
-		fmt.Fprintln(os.Stderr, "geo assets changed — reconnecting to pick up new lists")
-		return cmdReconnect(ctx)
+		// Don't bounce a live tunnel just to load new geo lists. xray
+		// only reads geoip.dat/geosite.dat at startup, so picking them up
+		// means a stop/start of xray + a TUN restart — every daily timer
+		// tick (and the OnBootSec one ~2min after login) would drop tun0
+		// and kill all routed traffic for a few seconds. The refreshed
+		// lists aren't time-critical; let the next natural reconnect
+		// (server switch, resume, or manual `reconnect`) apply them.
+		fmt.Fprintln(os.Stderr, "geo assets changed — will apply on next reconnect")
 	}
 	return nil
 }

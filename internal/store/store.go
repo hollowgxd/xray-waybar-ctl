@@ -44,10 +44,18 @@ type State struct {
 	Results     map[string]TestResult `json:"results,omitempty"`
 
 	// WatchdogAttempts counts consecutive auto-reconnect attempts since
-	// the last healthy check. The watchdog gives up (clears Active) once
-	// this crosses a threshold so a broken subscription doesn't loop
+	// the last healthy check. The watchdog pauses (sets WatchdogPausedUntil)
+	// once this crosses a threshold so a broken subscription doesn't loop
 	// `launch` forever. Reset to 0 on a healthy probe.
 	WatchdogAttempts int `json:"watchdog_attempts,omitempty"`
+
+	// WatchdogPausedUntil is set when the watchdog has given up the
+	// current burst of reconnect attempts. While time.Now() is before
+	// this timestamp, ticks are skipped — but Active is preserved so
+	// the next tick after the pause window expires (or the next
+	// user-driven connect / post-resume event) picks up where we left
+	// off. Reset by successful launch() and by post-resume handler.
+	WatchdogPausedUntil time.Time `json:"watchdog_paused_until,omitempty"`
 
 	// Profile overrides cfg.RoutingProfile when non-empty. Set by
 	// `xray-waybar-ctl profile <name>`; cleared by `profile reset`.

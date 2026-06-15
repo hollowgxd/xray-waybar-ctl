@@ -115,7 +115,17 @@ func Connect(ctx context.Context, who, why string) (*Watcher, error) {
 		return nil, fmt.Errorf("sleepwatch: AddMatchSignal: %w", err)
 	}
 
-	sigCh := make(chan *dbus.Signal, 4)
+	// Buffered generously. godbus's defaultSignalHandler.deliver() does
+	// a non-blocking send first; on overflow it spawns a goroutine per
+	// signal (`deferredDeliver`) that blocks on this channel send and
+	// retains a *dbus.Signal until drained. Under a system-bus signal
+	// burst (e.g. NetworkManager state churn, systemd unit activity) a
+	// small buffer means hundreds of those goroutines pile up, each
+	// pinning a Signal struct — that is how a "should-be-idle" watchdog
+	// process ends up sitting on hundreds of MB of heap. We always
+	// drain in the loop below in O(1) per signal so the larger buffer
+	// just absorbs bursts without ever needing the goroutine fallback.
+	sigCh := make(chan *dbus.Signal, 1024)
 	conn.Signal(sigCh)
 	go w.loop(loopCtx, sigCh)
 	return w, nil
