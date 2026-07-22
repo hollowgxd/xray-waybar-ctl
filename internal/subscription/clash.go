@@ -8,12 +8,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// isClashYAML returns true when body looks like a Clash/Clash.Meta config
-// (top-level `proxies:` key present). Conservative on purpose — base64'd
-// URI lists never contain that string at column 0.
+// isClashYAML returns true when body looks like a Clash/Mihomo config
+// (top-level proxies or proxy-providers present). Conservative on purpose —
+// base64'd URI lists never contain those keys at column 0.
 func isClashYAML(body []byte) bool {
+	return IsNativeMihomoYAML(body)
+}
+
+// IsNativeMihomoYAML reports whether body contains a native Mihomo proxy
+// source. Provider-only profiles are valid even though they have no inline
+// proxies for this package to flatten into server.Server values.
+func IsNativeMihomoYAML(body []byte) bool {
 	s := string(body)
-	return strings.HasPrefix(s, "proxies:") || strings.Contains(s, "\nproxies:")
+	return strings.HasPrefix(s, "proxies:") || strings.Contains(s, "\nproxies:") ||
+		strings.HasPrefix(s, "proxy-providers:") || strings.Contains(s, "\nproxy-providers:")
 }
 
 type clashDoc struct {
@@ -87,15 +95,15 @@ func clashToServer(p clashProxy) (server.Server, error) {
 		return server.Server{}, fmt.Errorf("missing server/port")
 	}
 	s := server.Server{
-		Name:        p.Name,
-		Protocol:    strings.ToLower(p.Type),
-		Address:     p.Server,
-		Port:        p.Port,
-		Network:     firstNonEmpty(p.Network, "tcp"),
-		Flow:        p.Flow,
-		SNI:         firstNonEmpty(p.SNI, p.Servername),
-		Fingerprint: p.Fingerprint,
-		ALPN:        p.ALPN,
+		Name:          p.Name,
+		Protocol:      strings.ToLower(p.Type),
+		Address:       p.Server,
+		Port:          p.Port,
+		Network:       firstNonEmpty(p.Network, "tcp"),
+		Flow:          p.Flow,
+		SNI:           firstNonEmpty(p.SNI, p.Servername),
+		Fingerprint:   p.Fingerprint,
+		ALPN:          p.ALPN,
 		AllowInsecure: p.SkipCertVerify,
 	}
 	if p.TLS {

@@ -11,6 +11,15 @@ import (
 // FetchTimeout caps a single GET. Callers can also pass a context.
 const FetchTimeout = 15 * time.Second
 
+// FetchOptions describes client identity headers used by subscription
+// routers such as Remnawave. Mihomo mode deliberately identifies as a
+// Clash.Meta client so the panel returns a native MIHOMO document.
+type FetchOptions struct {
+	HWID      string
+	UserAgent string
+	DeviceOS  string
+}
+
 // Fetch downloads the raw subscription body. The caller is expected to
 // pass the body to Parse — fetch and parse are split so a stale cache
 // can be served when the network is unreachable.
@@ -20,6 +29,17 @@ const FetchTimeout = 15 * time.Second
 // returns a placeholder URI pointing at 0.0.0.0:1 with an instructional
 // fragment, which would silently produce a broken cache.
 func Fetch(ctx context.Context, rawURL, hwid string) ([]byte, error) {
+	return FetchWithOptions(ctx, rawURL, FetchOptions{
+		HWID:      hwid,
+		UserAgent: "xray-waybar-ctl/1.0",
+		DeviceOS:  "linux",
+	})
+}
+
+// FetchWithOptions downloads a subscription with an explicit client
+// identity. It is kept separate from Fetch so existing callers retain
+// the original Xray-oriented behaviour.
+func FetchWithOptions(ctx context.Context, rawURL string, opts FetchOptions) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, FetchTimeout)
 	defer cancel()
 
@@ -29,9 +49,16 @@ func Fetch(ctx context.Context, rawURL, hwid string) ([]byte, error) {
 	}
 	// Most subscription endpoints care about the User-Agent and refuse
 	// generic Go clients with a 403.
-	req.Header.Set("User-Agent", "xray-waybar-ctl/1.0")
-	if hwid != "" {
-		req.Header.Set("X-HWID", hwid)
+	ua := opts.UserAgent
+	if ua == "" {
+		ua = "xray-waybar-ctl/1.0"
+	}
+	req.Header.Set("User-Agent", ua)
+	if opts.DeviceOS != "" {
+		req.Header.Set("X-Device-OS", opts.DeviceOS)
+	}
+	if opts.HWID != "" {
+		req.Header.Set("X-HWID", opts.HWID)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

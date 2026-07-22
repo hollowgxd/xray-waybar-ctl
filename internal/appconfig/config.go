@@ -8,6 +8,7 @@ package appconfig
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,12 @@ import (
 
 // Config is the parsed app.yaml, with paths already expanded.
 type Config struct {
+	// Core selects the runtime backend. "xray" preserves the original
+	// one-server-per-process behaviour; "mihomo" runs the complete
+	// subscription as a native Mihomo profile and controls it over the
+	// localhost REST API.
+	Core string `yaml:"core"`
+
 	SubscriptionURL            string        `yaml:"subscription_url"`
 	SubscriptionUpdateInterval time.Duration `yaml:"-"` // derived from seconds
 	SubscriptionIntervalSec    int           `yaml:"subscription_update_interval"`
@@ -33,15 +40,23 @@ type Config struct {
 	XrayPort    int    `yaml:"xray_port"`
 	XrayAPIPort int    `yaml:"xray_api_port"`
 
+	MihomoBin              string `yaml:"mihomo_bin"`
+	MihomoHome             string `yaml:"mihomo_home"`
+	MihomoConfig           string `yaml:"mihomo_config"`
+	MihomoSubscriptionFile string `yaml:"mihomo_subscription_file"`
+	MihomoSecretFile       string `yaml:"mihomo_secret_file"`
+	MihomoController       string `yaml:"mihomo_controller"`
+	MihomoGroup            string `yaml:"mihomo_group"`
+	MihomoTUNStack         string `yaml:"mihomo_tun_stack"`
+
 	PIDFile   string `yaml:"pid_file"`
 	LogFile   string `yaml:"log_file"`
 	CacheFile string `yaml:"cache_file"`
 	StateFile string `yaml:"state_file"`
 	HWIDFile  string `yaml:"hwid_file"`
 
-	// SystemWide enables the TUN sidecar (hev-socks5-tunnel via the
-	// xray-waybar-tun.service systemd unit). When true, `connect` will
-	// start the unit after xray comes up; `disconnect` will stop it.
+	// SystemWide enables the external tun2socks sidecar for Xray or the
+	// native TUN/auto-route stack for Mihomo.
 	SystemWide bool `yaml:"system_wide"`
 
 	// RoutingProfile chooses how xrayconfig.Generate populates routing.rules.
@@ -134,6 +149,25 @@ func (c *Config) TestTimeout() time.Duration {
 	return time.Duration(c.TestTimeoutMS) * time.Millisecond
 }
 
+// IsMihomo reports whether the native Mihomo backend is selected.
+func (c *Config) IsMihomo() bool { return c.Core == "mihomo" }
+
+// LocalPort is the SOCKS/mixed port exposed by the active backend.
+func (c *Config) LocalPort() int { return c.XrayPort }
+
+// MihomoControllerPort extracts the TCP port used for readiness checks.
+func (c *Config) MihomoControllerPort() (int, error) {
+	_, rawPort, err := net.SplitHostPort(c.MihomoController)
+	if err != nil {
+		return 0, fmt.Errorf("appconfig: mihomo_controller: %w", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(rawPort, "%d", &port); err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("appconfig: invalid mihomo_controller port %q", rawPort)
+	}
+	return port, nil
+}
+
 // Load reads the YAML at path, applies defaults and expands ~ in every
 // path field. If path is empty, the standard locations are tried in
 // order. Returns the resolved config plus the actual path it used.
@@ -176,6 +210,7 @@ func defaultConfigPath() (string, error) {
 
 func defaults() *Config {
 	return &Config{
+		Core:                    "xray",
 		SubscriptionIntervalSec: 3600,
 		TestURL:                 "http://www.gstatic.com/generate_204",
 		TestTimeoutMS:           3000,
@@ -184,6 +219,13 @@ func defaults() *Config {
 		XrayConfig:              "~/.config/xray-waybar/xray.json",
 		XrayPort:                1080,
 		XrayAPIPort:             8080,
+		MihomoBin:               "/usr/bin/mihomo",
+		MihomoHome:              "~/.local/share/xray-waybar/mihomo",
+		MihomoConfig:            "~/.local/share/xray-waybar/mihomo/config.yaml",
+		MihomoSubscriptionFile:  "~/.cache/xray-waybar/mihomo-subscription.yaml",
+		MihomoSecretFile:        "~/.local/share/xray-waybar/mihomo-secret",
+		MihomoController:        "127.0.0.1:9090",
+		MihomoTUNStack:          "mixed",
 		PIDFile:                 "/tmp/xray-waybar.pid",
 		LogFile:                 "~/.local/share/xray-waybar/xray.log",
 		CacheFile:               "~/.cache/xray-waybar/servers.json",
@@ -211,8 +253,16 @@ func (c *Config) normalize() error {
 	}
 	c.SubscriptionUpdateInterval = time.Duration(c.SubscriptionIntervalSec) * time.Second
 
+	c.Core = strings.ToLower(strings.TrimSpace(c.Core))
+	if c.Core == "" {
+		c.Core = "xray"
+	}
+	if c.Core != "xray" && c.Core != "mihomo" {
+		return fmt.Errorf("appconfig: core must be xray or mihomo, got %q", c.Core)
+	}
+
 	var err error
-	for _, p := range []*string{&c.XrayConfig, &c.PIDFile, &c.LogFile, &c.CacheFile, &c.StateFile, &c.HWIDFile, &c.XrayBin, &c.Geo.Dir} {
+	for _, p := range []*string{&c.XrayConfig, &c.PIDFile, &c.LogFile, &c.CacheFile, &c.StateFile, &c.HWIDFile, &c.XrayBin, &c.MihomoBin, &c.MihomoHome, &c.MihomoConfig, &c.MihomoSubscriptionFile, &c.MihomoSecretFile, &c.Geo.Dir} {
 		*p, err = expand(*p)
 		if err != nil {
 			return err
@@ -223,6 +273,17 @@ func (c *Config) normalize() error {
 	}
 	if c.TestTimeoutMS < 100 {
 		c.TestTimeoutMS = 3000
+	}
+	if c.IsMihomo() {
+		if _, err := c.MihomoControllerPort(); err != nil {
+			return err
+		}
+		switch strings.ToLower(c.MihomoTUNStack) {
+		case "system", "gvisor", "mixed":
+			c.MihomoTUNStack = strings.ToLower(c.MihomoTUNStack)
+		default:
+			return fmt.Errorf("appconfig: mihomo_tun_stack must be system, gvisor or mixed")
+		}
 	}
 	if c.RoutingProfile == "" {
 		c.RoutingProfile = "proxy-all"

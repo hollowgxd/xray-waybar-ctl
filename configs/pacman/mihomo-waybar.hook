@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/bin/mihomo
+
+[Action]
+Description = Re-applying cap_net_admin to /usr/bin/mihomo for xray-waybar-ctl
+When = PostTransaction
+Exec = /usr/sbin/setcap cap_net_admin+ep /usr/bin/mihomo

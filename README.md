@@ -1,16 +1,19 @@
 # xray-waybar-ctl
 
-CLI на Go, который управляет `xray-core` и отдаёт статус кастомному модулю Waybar.
+CLI на Go, который управляет `xray-core` **или** `mihomo` и отдаёт статус кастомному модулю Waybar.
 Без GUI, без Electron — `xray-waybar-ctl status` печатает одну строку JSON, всё остальное
 прячется за `connect` / `disconnect` / `use-next`.
 
 ## Возможности
 
-- Скачивает подписку (base64 → список `vless://` / `vmess://` / `trojan://`).
+- Выбираемое ядро через `core: xray | mihomo`; `xray` остаётся дефолтом для обратной совместимости.
+- Скачивает base64/URI, Xray JSON array и нативные Mihomo YAML-подписки.
 - Парсит VLESS+REALITY, TLS, WS, gRPC.
-- Параллельно URL-тестит серверы и выбирает живой с минимальной латентностью
-  (или первый из заданного `priority`).
-- Запускает xray-core как detached процесс с PID-файлом, ждёт открытия SOCKS5 порта.
+- Xray параллельно тестирует отдельными временными процессами; Mihomo тестирует и
+  переключает группы через localhost REST API без рестарта ядра.
+- В Mihomo режиме сохраняет полную YAML-политику (rules, DNS, providers, URL-test,
+  fallback) и достраивает безопасный `VPN → AUTO`, если подписка содержит только прокси.
+- Запускает выбранное ядро как detached процесс с PID-файлом и проверкой готовности.
 - Печатает JSON для Waybar (`connected` / `disconnected` / `loading` / `error`).
 - Команды переключения: `use <name>`, `use-next`, `use-prev`, `reconnect`, `toggle`.
 
@@ -18,14 +21,15 @@ CLI на Go, который управляет `xray-core` и отдаёт ст�
 
 Нужно поставить:
 
-- `xray-core` — основной демон
+- одно ядро: `xray-core` или `mihomo`
 - `waybar` — куда выводится статус
 - `walker` — dmenu-лаунчер для встроенного меню переключения серверов
   (`xray-waybar-ctl menu`)
 - Go ≥ 1.21 — для сборки
-- `tun2socks` — только если планируется `system_wide: true`
+- `tun2socks` — только для `core: xray` + `system_wide: true`; у Mihomo TUN нативный
 
-На Arch это всё в `pacman`/AUR (`yay -S xray waybar walker-bin tun2socks go`).
+На Arch Xray-вариант можно собрать после `yay -S xray waybar walker-bin tun2socks go`.
+Для Mihomo установи официальный бинарник `mihomo` вместо `xray`/`tun2socks`.
 На Debian/Ubuntu/Fedora — штатный пакетный менеджер; `walker` и `tun2socks`
 если в репах нет, берутся из релизов:
 <https://github.com/abenz1267/walker>,
@@ -74,10 +78,33 @@ cp ~/.local/share/xray-waybar/app.yaml.example ~/.config/xray-waybar/app.yaml
 $EDITOR ~/.config/xray-waybar/app.yaml
 ```
 
-Минимально нужен только `subscription_url`. Все остальные поля имеют разумные дефолты —
+Минимально нужны `subscription_url` и выбор `core` (по умолчанию `xray`). Все остальные поля имеют разумные дефолты —
 см. `configs/app.yaml.example`.
 
-Если `routing_profile` не `proxy-all` / `direct` — один раз нужно скачать
+### Mihomo backend
+
+```yaml
+core: mihomo
+subscription_url: "https://panel.example/sub/token"
+xray_port: 1080             # mixed HTTP/SOCKS port в режиме Mihomo
+mihomo_controller: "127.0.0.1:9090"
+mihomo_group: ""            # авто; лучше задать имя, если select-групп несколько
+system_wide: true            # native Mihomo TUN
+```
+
+Запрос подписки отправляется с `User-Agent: Clash-Meta/xray-waybar-ctl`, поэтому
+панель может вернуть свой полноценный Mihomo/Clash.Meta шаблон. Он используется
+как основной источник routing/DNS/groups/providers, но controller, secret и bind
+принудительно остаются локальными.
+
+Если local path всё же отдаёт массив полных Xray JSON-конфигов, CLI не передаёт
+его в Mihomo «как есть»: он извлекает VLESS/VMess/Trojan outbounds (TCP/WS/gRPC,
+а для VLESS также XHTTP; TLS/REALITY) и строит минимальный Mihomo YAML с
+`VPN` и `AUTO/url-test`. Это fallback;
+для production предпочтительнее отдельный нативный Mihomo-шаблон панели — только
+так сохраняются все её rules, DNS, proxy-providers, sniffer и дополнительные протоколы.
+
+Для Xray: если `routing_profile` не `proxy-all` / `direct` — один раз нужно скачать
 geoip/geosite, иначе xray откажется стартовать:
 
 ```sh
@@ -99,11 +126,11 @@ xray-waybar-ctl status      # JSON для Waybar
 
 ## System-wide режим (весь трафик через VPN)
 
-По умолчанию xray-waybar-ctl поднимает только локальный SOCKS5 на `127.0.0.1:1080`,
+По умолчанию xray-waybar-ctl поднимает только локальный SOCKS5/mixed порт на `127.0.0.1:1080`,
 и приложения должны сами через него ходить. Чтобы весь трафик системы автоматически
 шёл через VPN — включи system-wide режим через TUN.
 
-### Установка
+### Xray: внешний tun2socks
 
 ```sh
 yay -S tun2socks            # gVisor-based, лежит в AUR
@@ -142,6 +169,20 @@ system_wide: true
 `disconnect` останавливает unit перед тем как глушить xray (иначе пакеты ушли бы
 в мёртвый SOCKS5). Если хочешь убрать system-wide вообще — `sudo make uninstall-system`.
 
+### Mihomo: native TUN
+
+Mihomo не использует `xray-waybar-tun.service`: `tun.enable`, `auto-route`,
+`auto-detect-interface` и DNS hijack включаются прямо в его runtime YAML.
+Один раз выдай бинарнику минимальную capability:
+
+```sh
+sudo make install-mihomo-cap
+```
+
+После этого достаточно `core: mihomo` и `system_wide: true`. Pacman-hook из
+этого target повторно применит capability после обновления пакета. Удаление:
+`sudo make uninstall-mihomo-cap`.
+
 Проверка:
 ```sh
 ip route                                # должен быть `default dev tun0 metric 1`
@@ -160,7 +201,7 @@ make install-monitor
 - `xray-waybar-ping.timer` — раз в 30s гоняет ping-батч, чтобы тултип и
   меню walker показывали актуальные латентности.
 - `xray-waybar-watchdog.service` — long-lived демон с внутренним 10s
-  loop. Ловит две вещи: (1) xray умер за tun2socks → автореконнект,
+  loop. Ловит две вещи: (1) выбранное ядро/API умерло → автореконнект,
   (2) система проснулась после suspend → tear down + reconnect через
   D-Bus signal `PrepareForSleep` от logind.
 - `xray-waybar-geo.timer` — раз в сутки обновляет `geoip.dat` /
@@ -178,11 +219,12 @@ journalctl --user -u xray-waybar-watchdog.service -f
 ## Меню переключения
 
 Команда `xray-waybar-ctl menu` поднимает `walker --dmenu` со списком
-серверов; первой строкой — текущий профиль. Выбор сервера → `use`,
-выбор `Profile: …` → второй walker с вариантами `routing_profile`
+серверов. Выбор сервера → `use`. В Xray режиме первой строкой также идёт
+`Profile: …` → второй walker с вариантами `routing_profile`
 (proxy-all / direct / smart / whitelist / custom URL). Запись идёт в
 `state.json` и перебивает значение из `app.yaml` до
-`xray-waybar-ctl profile reset`.
+`xray-waybar-ctl profile reset`. В Mihomo режиме routing приходит из YAML,
+поэтому Xray-подменю скрыто; provider-узлы появляются после первого `connect`.
 
 Биндить на хоткей оконного менеджера или на `on-click` модуля Waybar.
 `walker` должен быть в `$PATH` — иначе `menu` вернёт ошибку, остальной
@@ -222,6 +264,9 @@ CLI работает.
 make test       # юнит-тесты
 make vet
 make build      # выдаёт ./xray-waybar-ctl
+
+# опционально: проверить сгенерированный YAML реальным ядром
+MIHOMO_BIN=/usr/bin/mihomo go test ./internal/mihomo -run TestPreparedConfigAcceptedByMihomo -v
 ```
 
 ## Лицензия

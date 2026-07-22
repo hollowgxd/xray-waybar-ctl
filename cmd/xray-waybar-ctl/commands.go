@@ -52,6 +52,10 @@ func cmdStatus(_ context.Context) error {
 		emitWaybar(waybar.Error(err.Error()))
 		return nil
 	}
+	if lc.cfg.IsMihomo() {
+		emitWaybar(mihomoWaybarStatus(context.Background(), lc))
+		return nil
+	}
 
 	running, _ := process.IsRunning(lc.cfg.PIDFile)
 	if !running || lc.state.Active == nil {
@@ -98,6 +102,9 @@ func cmdConnect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if lc.cfg.IsMihomo() {
+		return cmdMihomoConnect(ctx, lc)
+	}
 	if err := ensureFreshCache(ctx, lc, false); err != nil {
 		return err
 	}
@@ -109,7 +116,7 @@ func cmdConnect(ctx context.Context) error {
 	// them down before testing — otherwise the temp xray instances
 	// the tester spawns get their traffic looped back into tun0 and
 	// every server appears dead.
-	if lc.cfg.SystemWide {
+	if lc.cfg.SystemWide && !lc.cfg.IsMihomo() {
 		if err := sysmode.Stop(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "warn: stop tunnel before test: %v\n", err)
 		}
@@ -168,7 +175,7 @@ func cmdDisconnect(ctx context.Context) error {
 	}
 	// Stop the tunnel *before* killing xray so no packets get sent into
 	// a dead SOCKS5 backend.
-	if lc.cfg.SystemWide {
+	if lc.cfg.SystemWide && !lc.cfg.IsMihomo() {
 		if err := sysmode.Stop(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "warn: system_wide tunnel stop: %v\n", err)
 		}
@@ -208,7 +215,11 @@ func cmdUpdate(ctx context.Context) error {
 	if err := ensureFreshCache(ctx, lc, true); err != nil {
 		return err
 	}
-	fmt.Printf("cached %d servers from %s\n", len(lc.cache.Servers), lc.cfg.SubscriptionURL)
+	if lc.cfg.IsMihomo() && len(lc.cache.Servers) == 0 {
+		fmt.Println("cached native Mihomo profile (proxies are supplied by providers at runtime)")
+	} else {
+		fmt.Printf("cached %d servers\n", len(lc.cache.Servers))
+	}
 	return nil
 }
 
@@ -235,8 +246,12 @@ func cmdList(_ context.Context) error {
 		if lc.state.Active != nil && lc.state.Active.Name == s.Name {
 			status = "*active"
 		}
+		endpoint := s.Endpoint()
+		if s.Address == "" {
+			endpoint = "mihomo-managed"
+		}
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			i, s.DisplayName(), s.Protocol, s.Endpoint(), s.Security, latency, status)
+			i, s.DisplayName(), s.Protocol, endpoint, s.Security, latency, status)
 	}
 	return w.Flush()
 }
@@ -248,6 +263,9 @@ func cmdTest(ctx context.Context) error {
 	}
 	if err := ensureFreshCache(ctx, lc, false); err != nil {
 		return err
+	}
+	if lc.cfg.IsMihomo() {
+		return cmdMihomoTest(ctx, lc)
 	}
 	if len(lc.cache.Servers) == 0 {
 		return errNoServers
@@ -363,6 +381,12 @@ func cmdPing(ctx context.Context) error {
 	if len(lc.cache.Servers) == 0 {
 		return errNoServers
 	}
+	if lc.cfg.IsMihomo() {
+		if running, _ := process.IsRunning(lc.cfg.PIDFile); !running {
+			return nil
+		}
+		return cmdMihomoPing(ctx, lc)
+	}
 
 	results := pinger.PingAll(ctx, lc.cache.Servers, lc.cfg.TestTimeout())
 	if lc.state.Results == nil {
@@ -420,15 +444,17 @@ func cmdMenu(ctx context.Context) error {
 	if lc.state.Active != nil {
 		currentName = lc.state.Active.Name
 	}
-	// One pivot row. The leading gear glyph + trailing arrow telegraph
-	// "this opens another menu", and is also how parseMenuChoice routes
-	// the selection to cmdMenuProfiles.
-	fmt.Fprintf(&lines, "%s%sProfile: %s%s→\n", profileMenuMarker, menuSep, activeProfile(lc), menuSep)
+	menuOffset := 0
+	if !lc.cfg.IsMihomo() {
+		// Xray has an extra pivot into its routing-profile menu. Mihomo
+		// routing and policy groups come from the native subscription.
+		fmt.Fprintf(&lines, "%s%sProfile: %s%s→\n", profileMenuMarker, menuSep, activeProfile(lc), menuSep)
+		menuOffset = 1
+	}
 	currentIdx := -1
 	for i, s := range lc.cache.Servers {
 		if s.Name == currentName {
-			// +1 because the pivot row is line 0.
-			currentIdx = i + 1
+			currentIdx = i + menuOffset
 			break
 		}
 	}
@@ -582,6 +608,10 @@ func cmdUpdateGeo(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if lc.cfg.IsMihomo() {
+		fmt.Fprintln(os.Stderr, "mihomo: geo/rule providers are managed by the native subscription")
+		return nil
+	}
 	rulesURL := ""
 	if profileNeedsRules(activeProfile(lc)) {
 		rulesURL = appconfig.ProfileRulesURL(activeProfile(lc))
@@ -636,6 +666,13 @@ func cmdProfile(ctx context.Context, args []string) error {
 	lc, err := loadAll()
 	if err != nil {
 		return err
+	}
+	if lc.cfg.IsMihomo() {
+		if len(args) == 0 {
+			fmt.Println("current profile: mihomo/native (routing comes from the subscription YAML)")
+			return nil
+		}
+		return fmt.Errorf("profile switching is Xray-only; select a Mihomo policy group/proxy instead")
 	}
 	if len(args) == 0 {
 		current := activeProfile(lc)

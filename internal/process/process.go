@@ -1,4 +1,4 @@
-// Package process manages a detached xray-core child process. The
+// Package process manages a detached proxy-core child process. The
 // process is identified by a PID file written to disk; restarts after
 // the CLI exits are how the model becomes "daemon-like" without
 // systemd.
@@ -25,6 +25,11 @@ type StartOptions struct {
 	ConfigPath string
 	PIDFile    string
 	LogFile    string
+	// Name is used in diagnostics. Defaults to the executable basename.
+	Name string
+	// Args overrides the legacy Xray invocation (`-config <path>`).
+	// Mihomo uses `-d <home> -f <path>`.
+	Args []string
 
 	// ReadyPort is polled with a TCP dial to confirm xray actually
 	// bound its inbound. Set to the SOCKS port.
@@ -38,17 +43,24 @@ type StartOptions struct {
 	ExtraEnv []string
 }
 
-// Start launches xray detached from the current terminal, writes the
+// Start launches a core detached from the current terminal, writes the
 // PID file, and blocks until the inbound port accepts connections.
 //
-// If xray exits before the port opens, the returned error wraps the
+// If the core exits before the port opens, the returned error wraps the
 // last bytes of LogFile so the caller can show them to the user.
 func Start(ctx context.Context, opts StartOptions) (int, error) {
 	if err := ensureParentDirs(opts.PIDFile, opts.LogFile); err != nil {
 		return 0, err
 	}
+	name := opts.Name
+	if name == "" {
+		name = filepath.Base(opts.BinPath)
+	}
+	if name == "" || name == "." {
+		name = "core"
+	}
 	if running, pid := IsRunning(opts.PIDFile); running {
-		return pid, fmt.Errorf("process: xray already running (pid %d)", pid)
+		return pid, fmt.Errorf("process: %s already running (pid %d)", name, pid)
 	}
 
 	logF, err := os.OpenFile(opts.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -57,7 +69,11 @@ func Start(ctx context.Context, opts StartOptions) (int, error) {
 	}
 	defer logF.Close()
 
-	cmd := exec.Command(opts.BinPath, "-config", opts.ConfigPath)
+	args := opts.Args
+	if len(args) == 0 {
+		args = []string{"-config", opts.ConfigPath}
+	}
+	cmd := exec.Command(opts.BinPath, args...)
 	cmd.Stdout = logF
 	cmd.Stderr = logF
 	cmd.Stdin = nil
@@ -87,7 +103,7 @@ func Start(ctx context.Context, opts StartOptions) (int, error) {
 		_ = Stop(opts.PIDFile, 2*time.Second)
 		tail, _ := tailFile(opts.LogFile, 4096)
 		if tail != "" {
-			return pid, fmt.Errorf("%w\nxray log tail:\n%s", err, tail)
+			return pid, fmt.Errorf("%w\n%s log tail:\n%s", err, name, tail)
 		}
 		return pid, err
 	}
@@ -146,8 +162,9 @@ func Stop(pidFile string, gracePeriod time.Duration) error {
 	return nil
 }
 
-// KillStraysByConfig SIGKILLs every xray-core process whose argv contains
-// `-config <configPath>` and whose PID is NOT pidFile's recorded PID.
+// KillStraysByConfig SIGKILLs every managed core process whose argv
+// contains `-config <configPath>` or `-f <configPath>` and whose PID is
+// NOT pidFile's recorded PID.
 //
 // This is a belt-and-braces cleanup: in theory, the Stop → Start sequence
 // in launch() is enough to keep at most one xray per config alive. In
@@ -185,7 +202,7 @@ func KillStraysByConfig(configPath, pidFile string) int {
 			continue
 		}
 		// /proc/<pid>/cmdline is NUL-separated argv. Split and look for
-		// an exact `-config` + path pair so a substring collision can't
+		// an exact config flag + path pair so a substring collision can't
 		// false-positive.
 		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
 		if !matchesXrayConfig(argv, configPath) {
@@ -198,7 +215,7 @@ func KillStraysByConfig(configPath, pidFile string) int {
 	return killed
 }
 
-// matchesXrayConfig returns true if argv looks like `xray ... -config <path>`.
+// matchesXrayConfig returns true for the Xray and Mihomo config flags.
 func matchesXrayConfig(argv []string, configPath string) bool {
 	if len(argv) == 0 {
 		return false
@@ -206,7 +223,7 @@ func matchesXrayConfig(argv []string, configPath string) bool {
 	// The binary path can be anything ending in /xray (system path) or
 	// the bare name. Don't constrain it — we identify by the config arg.
 	for i := 0; i < len(argv)-1; i++ {
-		if argv[i] == "-config" && argv[i+1] == configPath {
+		if (argv[i] == "-config" || argv[i] == "-f") && argv[i+1] == configPath {
 			return true
 		}
 	}
@@ -284,7 +301,7 @@ func waitForPort(ctx context.Context, port int, timeout time.Duration, pidFile s
 			return nil
 		}
 		if running, _ := IsRunning(pidFile); !running {
-			return fmt.Errorf("process: xray exited before port %d opened", port)
+			return fmt.Errorf("process: core exited before port %d opened", port)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("process: port %d did not open within %s", port, timeout)

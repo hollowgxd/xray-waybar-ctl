@@ -4,6 +4,7 @@
 package subscription
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,12 @@ import (
 func Parse(body []byte) ([]server.Server, []error) {
 	if isClashYAML(body) {
 		return parseClash(body)
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) > 0 && (trimmed[0] == '[' || trimmed[0] == '{') {
+		if servers, errs := parseXrayJSON(trimmed); len(servers) > 0 {
+			return servers, errs
+		}
 	}
 	decoded := decodeBase64Loose(string(body))
 	lines := strings.Split(string(decoded), "\n")
@@ -92,6 +99,7 @@ func parseVLESS(uri string) (server.Server, error) {
 		Path:        q.Get("path"),
 		Host:        q.Get("host"),
 		ServiceName: q.Get("serviceName"),
+		XHTTPMode:   q.Get("mode"),
 		HeaderType:  q.Get("headerType"),
 		Raw:         uri,
 	}
