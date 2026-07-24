@@ -21,10 +21,22 @@ common_env=(
   "XRAY_WAYBAR_CTL_BINARY=${ctl_binary}"
   "XRAY_WAYBAR_MIHOMO_BINARY=/bin/true"
   "XRAY_WAYBAR_SKIP_SYSTEMD=1"
+  "XRAY_WAYBAR_SKIP_RELOAD=1"
 )
+
+mkdir -p "${smoke_root}/waybar"
+cat >"${smoke_root}/waybar/config.jsonc" <<'EOF'
+{
+  // smoke comment must survive
+  "modules-right": [
+    "clock",
+  ],
+}
+EOF
 
 env "${common_env[@]}" bash "${repo_root}/install.sh" \
   --yes --no-tun --no-connect \
+  --waybar-config "${smoke_root}/waybar/config.jsonc" \
   --subscription "https://example.test/sub/secret-token"
 
 config="${smoke_root}/config/xray-waybar/app.yaml"
@@ -32,6 +44,8 @@ test -x "${smoke_root}/prefix/bin/xray-waybar-ctl"
 test -x "${smoke_root}/prefix/lib/xray-waybar/mihomo"
 test -f "${smoke_root}/systemd/xray-waybar-watchdog.service"
 test -f "${smoke_root}/data/xray-waybar/waybar-module.jsonc"
+grep -Fq "// smoke comment must survive" "${smoke_root}/waybar/config.jsonc"
+grep -Fq '"custom/vpn"' "${smoke_root}/waybar/config.jsonc"
 test "$(stat -c '%a' "$config")" = "600"
 grep -Fq "core: mihomo" "$config"
 grep -Fq "system_wide: false" "$config"
@@ -40,9 +54,11 @@ grep -Fq "https://example.test/sub/secret-token" "$config"
 config_before="$(sha256sum "$config" | awk '{print $1}')"
 env "${common_env[@]}" bash "${repo_root}/install.sh" \
   --yes --no-tun --no-connect \
+  --waybar-config "${smoke_root}/waybar/config.jsonc" \
   --subscription "https://must-not-overwrite.example/sub"
 config_after="$(sha256sum "$config" | awk '{print $1}')"
 test "$config_before" = "$config_after"
+test "$(find "${smoke_root}/waybar" -maxdepth 1 -name 'config.jsonc.xray-waybar-backup-*' | wc -l)" = "1"
 
 bash -n "${repo_root}/install.sh"
 bash -n "${repo_root}/scripts/build-release.sh"

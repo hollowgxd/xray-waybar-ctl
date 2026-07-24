@@ -61,6 +61,10 @@ Waybar:
   status            Emit one line of JSON describing the current state
   menu              Open a walker dmenu picker of cached servers; selection → use
   menu-profiles     Open a walker dmenu picker of routing profiles (also reachable from menu)
+  waybar-install [--position right|center|left] [--config PATH]
+                    Back up and patch the active/default Waybar JSONC config.
+                    Adds custom/vpn to modules-right by default and preserves
+                    comments, formatting and existing custom/vpn settings.
 
 Routing:
   profile [name]    Show or change routing profile. Without args: print
@@ -103,6 +107,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdMenu(ctx)
 	case "menu-profiles":
 		return cmdMenuProfiles(ctx)
+	case "waybar-install":
+		return cmdWaybarInstall(args)
 	case "connect":
 		return cmdConnect(ctx)
 	case "disconnect":

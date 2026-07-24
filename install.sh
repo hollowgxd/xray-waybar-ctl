@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # systemd for the optional watchdog.
 
 REPO="${XRAY_WAYBAR_REPO:-hollowgxd/xray-waybar-ctl}"
-CTL_VERSION="${XRAY_WAYBAR_VERSION:-v0.1.0-canary.1}"
+CTL_VERSION="${XRAY_WAYBAR_VERSION:-v0.1.0-canary.2}"
 MIHOMO_VERSION="${XRAY_WAYBAR_MIHOMO_VERSION:-v1.19.29}"
 
 PREFIX="${XRAY_WAYBAR_PREFIX:-${HOME}/.local}"
@@ -30,6 +30,9 @@ CONNECT_NOW=true
 ASSUME_YES=false
 UNINSTALL=false
 PURGE=false
+INTEGRATE_WAYBAR=true
+WAYBAR_POSITION="right"
+WAYBAR_CONFIG=""
 
 if [[ -t 1 ]]; then
   BOLD=$'\033[1m'
@@ -64,6 +67,9 @@ xray-waybar-ctl — простой установщик Mihomo для Linux
   --subscription URL  URL подписки (без этого установщик спросит его)
   --no-tun            только локальный HTTP/SOCKS, без VPN для всей системы
   --no-connect        установить, но пока не подключаться
+  --no-waybar         не изменять конфиг Waybar
+  --waybar-position P добавить значок в right, center или left (по умолчанию right)
+  --waybar-config P   изменить конкретный конфиг вместо автоопределения
   --yes               не задавать вопрос подтверждения
   --uninstall         удалить программу, сохранив конфиг и данные
   --purge             с --uninstall также удалить конфиг и данные
@@ -88,6 +94,20 @@ while (($# > 0)); do
     --no-connect)
       CONNECT_NOW=false
       shift
+      ;;
+    --no-waybar)
+      INTEGRATE_WAYBAR=false
+      shift
+      ;;
+    --waybar-position)
+      (($# >= 2)) || die "--waybar-position требует right, center или left"
+      WAYBAR_POSITION="${2,,}"
+      shift 2
+      ;;
+    --waybar-config)
+      (($# >= 2)) || die "--waybar-config требует путь"
+      WAYBAR_CONFIG="$2"
+      shift 2
       ;;
     --yes|-y)
       ASSUME_YES=true
@@ -114,6 +134,8 @@ done
 if "$PURGE" && ! "$UNINSTALL"; then
   die "--purge используется только вместе с --uninstall"
 fi
+[[ "$WAYBAR_POSITION" == "right" || "$WAYBAR_POSITION" == "center" || "$WAYBAR_POSITION" == "left" ]] ||
+  die "--waybar-position должен быть right, center или left"
 
 [[ "$(uname -s)" == "Linux" ]] || die "сейчас поддерживается только Linux"
 [[ ${EUID} -ne 0 ]] || die "не запускай весь установщик через sudo; он сам запросит права для TUN"
@@ -270,12 +292,6 @@ write_waybar_snippets() {
     "on-scroll-up": "${BIN_DIR}/xray-waybar-ctl use-next",
     "on-scroll-down": "${BIN_DIR}/xray-waybar-ctl use-prev"
 }
-EOF
-  cat >"${APP_DATA_DIR}/waybar-style.css" <<'EOF'
-#custom-vpn { padding: 0 8px; }
-#custom-vpn.connected { color: #a6e3a1; }
-#custom-vpn.loading { color: #f9e2af; }
-#custom-vpn.error, #custom-vpn.degraded { color: #f38ba8; }
 EOF
 }
 
@@ -444,6 +460,32 @@ write_config_if_missing
 write_user_units
 write_waybar_snippets
 
+WAYBAR_INTEGRATED=false
+if "$INTEGRATE_WAYBAR" && [[ "${XRAY_WAYBAR_SKIP_WAYBAR:-0}" != "1" ]]; then
+  info "Добавляю модуль в активный конфиг Waybar…"
+  WAYBAR_ARGS=(waybar-install --position "$WAYBAR_POSITION")
+  if [[ -n "$WAYBAR_CONFIG" ]]; then
+    WAYBAR_ARGS+=(--config "$WAYBAR_CONFIG")
+  fi
+  if WAYBAR_RESULT="$("${BIN_DIR}/xray-waybar-ctl" "${WAYBAR_ARGS[@]}" 2>&1)"; then
+    printf '%s\n' "$WAYBAR_RESULT"
+    WAYBAR_INTEGRATED=true
+    ok "custom/vpn настроен в modules-${WAYBAR_POSITION} без CSS."
+    if command -v pgrep >/dev/null 2>&1 && command -v pkill >/dev/null 2>&1 &&
+       pgrep -x waybar >/dev/null 2>&1 &&
+       [[ "${XRAY_WAYBAR_SKIP_RELOAD:-0}" != "1" ]]; then
+      if pkill -SIGUSR2 -x waybar; then
+        ok "Waybar перезагружен."
+      else
+        warn "Конфиг изменён, но Waybar не принял сигнал перезагрузки."
+      fi
+    fi
+  else
+    warn "Автоматически изменить Waybar не удалось: $WAYBAR_RESULT"
+    warn "Готовый блок оставлен в ${APP_DATA_DIR}/waybar-module.jsonc"
+  fi
+fi
+
 cat >"$MANIFEST" <<EOF
 ctl_version=${CTL_VERSION}
 mihomo_version=${MIHOMO_VERSION}
@@ -487,7 +529,13 @@ printf '%s\n' "Команды:"
 printf '%s\n' "  ${BIN_DIR}/xray-waybar-ctl toggle      # включить/выключить"
 printf '%s\n' "  ${BIN_DIR}/xray-waybar-ctl test        # проверить узлы"
 printf '%s\n' "  ${BIN_DIR}/xray-waybar-ctl status      # состояние для Waybar"
-printf '\n%s\n' "Для значка в Waybar:"
-printf '%s\n' "  1. Добавь custom/vpn в modules-left/center/right."
-printf '%s\n' "  2. Вставь модуль из ${APP_DATA_DIR}/waybar-module.jsonc в конфиг Waybar."
-printf '%s\n' "  3. Добавь ${APP_DATA_DIR}/waybar-style.css в свой style.css и перезапусти Waybar."
+if "$WAYBAR_INTEGRATED"; then
+  printf '\n%s\n' "Waybar:"
+  printf '%s\n' "  custom/vpn уже добавлен в modules-${WAYBAR_POSITION}."
+  printf '%s\n' "  Это обычный блок Waybar без CSS — меняй позицию, клики, interval,"
+  printf '%s\n' "  format, tooltip и любые стили прямо в своём конфиге."
+else
+  printf '\n%s\n' "Для ручного добавления в Waybar:"
+  printf '%s\n' "  Добавь custom/vpn в modules-left/center/right и вставь блок из"
+  printf '%s\n' "  ${APP_DATA_DIR}/waybar-module.jsonc"
+fi

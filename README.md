@@ -24,7 +24,7 @@ CLI на Go, который управляет `xray-core` **или** `mihomo` �
 На Linux x86-64/ARM64 запусти мастер:
 
 ```sh
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.1/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh)
 ```
 
 Он сам:
@@ -34,7 +34,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0
 - по умолчанию включит native Mihomo TUN для всей системы;
 - установит user-systemd watchdog и периодическую проверку соединения;
 - сразу проверит подписку и попробует подключиться;
-- положит готовые сниппеты для Waybar в `~/.local/share/xray-waybar/`.
+- найдёт конфиг запущенного Waybar, сделает backup и добавит обычный
+  `custom/vpn` в `modules-right`;
+- перезагрузит Waybar сигналом `SIGUSR2`, если он уже работает.
 
 Go, клонирование репозитория и ручное редактирование YAML не нужны. Установщик
 не перезаписывает уже существующий `~/.config/xray-waybar/app.yaml`, поэтому той
@@ -44,19 +46,35 @@ Go, клонирование репозитория и ручное редакт
 
 ```sh
 # установить без первого подключения
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.1/install.sh) --no-connect
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --no-connect
 
 # локальный HTTP/SOCKS вместо системного VPN/TUN
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.1/install.sh) --no-tun
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --no-tun
+
+# поставить значок слева или вообще не менять Waybar
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --waybar-position left
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --waybar-config ~/.config/waybar/my-config.jsonc
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --no-waybar
 
 # удалить программу, сохранив конфиг и кэш
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.1/install.sh) --uninstall
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --uninstall
 ```
 
-Для показа значка всё ещё нужно добавить `custom/vpn` в один из массивов
-`modules-left` / `modules-center` / `modules-right` своего конфига Waybar.
-Установщик печатает точные пути к готовому модулю и CSS, но намеренно не
-переписывает пользовательский JSONC автоматически.
+Интеграция не добавляет CSS и не привязывает пользователя к оформлению
+проекта. В конфиге остаётся обычный блок Waybar: его можно перенести между
+`modules-left` / `modules-center` / `modules-right`, поменять `format`,
+`interval`, `tooltip`, действия мыши и оформить через свой `style.css`.
+Комментарии и существующее форматирование JSONC сохраняются. Повторная
+установка не дублирует модуль и не перезаписывает его пользовательские
+настройки.
+
+Вручную повторить интеграцию или выбрать позицию/конфиг:
+
+```sh
+xray-waybar-ctl waybar-install
+xray-waybar-ctl waybar-install --position center
+xray-waybar-ctl waybar-install --config ~/.config/waybar/my-config.jsonc
+```
 
 ### Сборка из исходников
 
