@@ -19,6 +19,47 @@ CLI на Go, который управляет `xray-core` **или** `mihomo` �
 
 ## Установка
 
+### Самый простой способ: Mihomo canary
+
+На Linux x86-64/ARM64 запусти мастер:
+
+```sh
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.1/install.sh)
+```
+
+Он сам:
+
+- скачает проверенные готовые бинарники `xray-waybar-ctl` и официального Mihomo;
+- спросит URL подписки и сохранит конфиг с правами `0600`;
+- по умолчанию включит native Mihomo TUN для всей системы;
+- установит user-systemd watchdog и периодическую проверку соединения;
+- сразу проверит подписку и попробует подключиться;
+- положит готовые сниппеты для Waybar в `~/.local/share/xray-waybar/`.
+
+Go, клонирование репозитория и ручное редактирование YAML не нужны. Установщик
+не перезаписывает уже существующий `~/.config/xray-waybar/app.yaml`, поэтому той
+же командой можно безопасно обновить бинарники.
+
+Полезные варианты:
+
+```sh
+# установить без первого подключения
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.1/install.sh) --no-connect
+
+# локальный HTTP/SOCKS вместо системного VPN/TUN
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.1/install.sh) --no-tun
+
+# удалить программу, сохранив конфиг и кэш
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.1/install.sh) --uninstall
+```
+
+Для показа значка всё ещё нужно добавить `custom/vpn` в один из массивов
+`modules-left` / `modules-center` / `modules-right` своего конфига Waybar.
+Установщик печатает точные пути к готовому модулю и CSS, но намеренно не
+переписывает пользовательский JSONC автоматически.
+
+### Сборка из исходников
+
 Нужно поставить:
 
 - одно ядро: `xray-core` или `mihomo`

@@ -3,7 +3,7 @@ PREFIX   ?= $(HOME)/.local
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: build install uninstall install-system uninstall-system install-mihomo-cap uninstall-mihomo-cap install-monitor uninstall-monitor test vet tidy clean run-status
+.PHONY: build install uninstall install-system uninstall-system install-mihomo-cap uninstall-mihomo-cap install-monitor uninstall-monitor test test-install vet tidy clean run-status
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/xray-waybar-ctl
@@ -120,6 +120,9 @@ uninstall-system:
 
 test:
 	go test ./...
+
+test-install:
+	bash scripts/install-smoke.sh
 
 vet:
 	go vet ./...
