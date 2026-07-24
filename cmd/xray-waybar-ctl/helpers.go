@@ -24,6 +24,9 @@ import (
 // Empty result means proxy-all. Keep in one place so menu, status and
 // launch agree.
 func activeProfile(lc *loadCtx) string {
+	if lc != nil && lc.cfg != nil && lc.cfg.IsMihomo() {
+		return "mihomo/native"
+	}
 	if lc.state != nil && lc.state.Profile != "" {
 		return lc.state.Profile
 	}
@@ -92,9 +95,17 @@ func loadAll() (*loadCtx, error) {
 // ensureFreshCache fetches the subscription if the cache is missing or
 // older than the configured interval. force=true ignores the interval.
 func ensureFreshCache(ctx context.Context, lc *loadCtx, force bool) error {
+	mihomoSourceMissing := false
+	if lc.cfg.IsMihomo() {
+		if _, err := os.Stat(lc.cfg.MihomoSubscriptionFile); err != nil {
+			mihomoSourceMissing = true
+		}
+	}
+	cacheEmpty := len(lc.cache.Servers) == 0 && (!lc.cfg.IsMihomo() || mihomoSourceMissing)
 	stale := force ||
-		len(lc.cache.Servers) == 0 ||
+		cacheEmpty ||
 		lc.cache.SourceURL != lc.cfg.SubscriptionURL ||
+		mihomoSourceMissing ||
 		(lc.cfg.SubscriptionUpdateInterval > 0 && lc.cache.Age() > lc.cfg.SubscriptionUpdateInterval)
 	if !stale {
 		return nil
@@ -106,19 +117,31 @@ func ensureFreshCache(ctx context.Context, lc *loadCtx, force bool) error {
 		// spot a permission problem.
 		fmt.Fprintf(os.Stderr, "warn: hwid: %v\n", err)
 	}
-	body, err := subscription.Fetch(ctx, lc.cfg.SubscriptionURL, hwid)
+	fetchOpts := subscription.FetchOptions{HWID: hwid, UserAgent: "xray-waybar-ctl/1.0", DeviceOS: "linux"}
+	if lc.cfg.IsMihomo() {
+		fetchOpts.UserAgent = "Clash-Meta/xray-waybar-ctl"
+	}
+	body, err := subscription.FetchWithOptions(ctx, lc.cfg.SubscriptionURL, fetchOpts)
 	if err != nil {
 		// keep the stale cache if we have one — partial connectivity
 		// shouldn't break a `connect` that worked yesterday.
-		if len(lc.cache.Servers) > 0 {
+		if len(lc.cache.Servers) > 0 || (lc.cfg.IsMihomo() && !mihomoSourceMissing) {
 			fmt.Fprintf(os.Stderr, "warn: subscription fetch failed, using stale cache: %v\n", err)
 			return nil
 		}
 		return err
 	}
 	servers, errs := subscription.Parse(body)
-	if len(servers) == 0 {
+	if len(servers) == 0 && !(lc.cfg.IsMihomo() && subscription.IsNativeMihomoYAML(body)) {
 		return fmt.Errorf("subscription returned no usable servers: %v", errs)
+	}
+	if lc.cfg.IsMihomo() {
+		// Validate before replacing the last-known-good raw profile. A panel
+		// error page can still arrive with HTTP 200 and must not poison the
+		// offline fallback used by the next connect.
+		if err := writeFileAtomic(lc.cfg.MihomoSubscriptionFile, body, 0o600); err != nil {
+			return fmt.Errorf("cache mihomo subscription: %w", err)
+		}
 	}
 	for _, e := range errs {
 		fmt.Fprintln(os.Stderr, "warn:", e)
@@ -154,6 +177,13 @@ func findServer(cache *store.Cache, name string) (server.Server, int, error) {
 // SOCKS port but can't actually carry traffic flaps forever. The only
 // automatic reset then lives in watchdogTick's healthy-probe branch.
 func launch(ctx context.Context, lc *loadCtx, s server.Server, resetFailures bool) error {
+	if lc.cfg.IsMihomo() {
+		return launchMihomo(ctx, lc, &s, resetFailures)
+	}
+	return launchXray(ctx, lc, s, resetFailures)
+}
+
+func launchXray(ctx context.Context, lc *loadCtx, s server.Server, resetFailures bool) error {
 	profile := activeProfile(lc)
 	opts := xrayconfig.Options{SocksPort: lc.cfg.XrayPort}
 	if lc.cfg.SystemWide {

@@ -31,25 +31,25 @@ func main() {
 
 var errUsage = errors.New("usage")
 
-const helpText = `xray-waybar-ctl — control xray-core from waybar
+const helpText = `xray-waybar-ctl — control Xray or Mihomo from Waybar
 
 Usage:
   xray-waybar-ctl <command> [args]
 
 Connection:
-  connect           Test, pick the best server and launch xray
-  disconnect        Stop xray
+  connect           Fetch the subscription and launch the selected core
+  disconnect        Stop the selected core
   toggle            connect if stopped, disconnect if running
   reconnect         disconnect + connect
 
 Servers:
   update            Re-fetch the subscription into the local cache
   list              Show cached servers
-  test              URL-test every cached server, print latency table
-  ping              TCP-only liveness check (cheap; used by systemd timer)
-  watchdog [--loop D]  Detect a dead/stuck xray and auto-reconnect. Also owns
+  test              URL-test proxies and print a latency table
+  ping              Cheap liveness/API check (used by systemd timer)
+  watchdog [--loop D]  Detect a dead/stuck core and auto-reconnect. Also owns
                        suspend/resume: subscribes to logind PrepareForSleep
-                       and cleanly stops xray before suspend, reconnects on
+                       and cleanly stops the core before suspend, reconnects on
                        resume.
                        Without --loop: one tick (manual use).
                        --loop 10s: daemon mode (used by systemd user service).
@@ -61,6 +61,10 @@ Waybar:
   status            Emit one line of JSON describing the current state
   menu              Open a walker dmenu picker of cached servers; selection → use
   menu-profiles     Open a walker dmenu picker of routing profiles (also reachable from menu)
+  waybar-install [--position right|center|left] [--config PATH]
+                    Back up and patch the active/default Waybar JSONC config.
+                    Adds custom/vpn to modules-right by default and preserves
+                    comments, formatting and existing custom/vpn settings.
 
 Routing:
   profile [name]    Show or change routing profile. Without args: print
@@ -70,10 +74,11 @@ Routing:
                       https://…/rules.json   — any HAPP-shaped rules file
                       reset                  — clear override, use app.yaml
                     Downloads rules.json + geoip/geosite as needed and
-                    reconnects xray if it is running.
+                    reconnects Xray if it is running. Xray-only.
   update-geo        Download geoip.dat / geosite.dat + the rules.json of
                     the active profile into the configured asset dir;
                     reconnects automatically if anything actually changed.
+                    Xray-only; Mihomo providers are managed by its YAML.
 
 Misc:
   version           Print version
@@ -102,6 +107,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdMenu(ctx)
 	case "menu-profiles":
 		return cmdMenuProfiles(ctx)
+	case "waybar-install":
+		return cmdWaybarInstall(args)
 	case "connect":
 		return cmdConnect(ctx)
 	case "disconnect":

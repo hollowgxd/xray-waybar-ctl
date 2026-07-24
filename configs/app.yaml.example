@@ -4,6 +4,11 @@
 subscription_url: "https://example.com/s/your-token"
 subscription_update_interval: 3600   # секунды; через сколько считать кэш устаревшим
 
+# Ядро: xray (совместимое поведение старых версий) или mihomo.
+# Mihomo запрашивает у панели нативный Clash.Meta-профиль, держит все
+# группы/правила в одном процессе и переключает узлы через localhost API.
+core: xray
+
 test_url: "http://www.gstatic.com/generate_204"
 test_timeout: 6000        # ms — таймаут одного теста (WS/gRPC handshake + TLS до EU/RU обычно укладывается в 4-5с, 3с слишком впритык)
 test_concurrency: 3       # сколько серверов тестировать параллельно (выше — конкуренция за CPU на старте xray делает таймауты ложно-срабатывающими)
@@ -20,6 +25,19 @@ xray_config: "~/.config/xray-waybar/xray.json"
 xray_port: 1080      # локальный SOCKS5 порт основного инстанса
 xray_api_port: 8080  # порт Stats API (v3)
 
+# Используется только при core: mihomo. xray_port выше становится локальным
+# mixed HTTP/SOCKS-портом. Пустой mihomo_group = автоопределение главного
+# select-group; если шаблон содержит несколько верхнеуровневых групп, лучше
+# явно указать имя (например "VPN" или "🌍 VPN").
+mihomo_bin: "/usr/bin/mihomo"
+mihomo_home: "~/.local/share/xray-waybar/mihomo"
+mihomo_config: "~/.local/share/xray-waybar/mihomo/config.yaml"
+mihomo_subscription_file: "~/.cache/xray-waybar/mihomo-subscription.yaml"
+mihomo_secret_file: "~/.local/share/xray-waybar/mihomo-secret"
+mihomo_controller: "127.0.0.1:9090"
+mihomo_group: ""
+mihomo_tun_stack: mixed  # system | gvisor | mixed
+
 pid_file: "/tmp/xray-waybar.pid"
 log_file: "~/.local/share/xray-waybar/xray.log"
 cache_file: "~/.cache/xray-waybar/servers.json"
@@ -30,13 +48,13 @@ state_file: "~/.cache/xray-waybar/state.json"
 # `rm -rf ~/.cache`.
 hwid_file: "~/.local/share/xray-waybar/hwid"
 
-# System-wide режим: весь IP-трафик заворачивается в xray через TUN
-# (hev-socks5-tunnel). Требует установленного systemd unit:
-#   sudo make install-system
-# Bypass для 10/8, 172.16/12, 192.168/16 встроен в unit.
+# System-wide режим:
+#   core: xray   — внешний tun2socks + `sudo make install-system`;
+#   core: mihomo — нативный Mihomo TUN + `sudo make install-mihomo-cap`.
 system_wide: false
 
-# Профиль роутинга внутри xray. Правила-списки (что в proxy, что в
+# Только для core: xray. В режиме Mihomo routing/groups/DNS берутся из
+# нативного YAML подписки. Профиль роутинга внутри xray. Правила-списки (что в proxy, что в
 # direct, что блокировать) НЕ хардкодятся в этом CLI — они скачиваются
 # из roscomvpn-routing того же мейнтейнера что geoip/geosite, поэтому
 # списки всегда совпадают с .dat-файлами.

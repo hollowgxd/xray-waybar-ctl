@@ -192,7 +192,7 @@ func watchdogTick(ctx context.Context) error {
 		return nil
 	}
 
-	if xrayHealthy(lc.cfg.PIDFile, lc.cfg.XrayPort) {
+	if coreHealthy(lc) {
 		if lc.state.WatchdogAttempts != 0 || !lc.state.WatchdogPausedUntil.IsZero() {
 			lc.state.WatchdogAttempts = 0
 			lc.state.WatchdogPausedUntil = time.Time{}
@@ -208,13 +208,14 @@ func watchdogTick(ctx context.Context) error {
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "watchdog: xray unhealthy (active=%s, attempts=%d)\n",
+	fmt.Fprintf(os.Stderr, "watchdog: %s unhealthy (active=%s, attempts=%d)\n",
+		lc.cfg.Core,
 		lc.state.Active.Name, lc.state.WatchdogAttempts)
 
 	// Tear down the tunnel before anything else. Every 10ms of busy-loop
 	// is hundreds of new ephemeral sockets and a chunk of netstack
 	// buffer growth.
-	if lc.cfg.SystemWide {
+	if lc.cfg.SystemWide && !lc.cfg.IsMihomo() {
 		if err := sysmode.Stop(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "watchdog: sysmode.Stop: %v\n", err)
 		}
@@ -230,6 +231,18 @@ func watchdogTick(ctx context.Context) error {
 		lc.state.WatchdogAttempts = 0
 		lc.state.WatchdogPausedUntil = until
 		return store.SaveState(lc.cfg.StateFile, lc.state)
+	}
+	if lc.cfg.IsMihomo() {
+		// Relaunch the native policy graph, not the concrete endpoint that
+		// happened to be active. Pinning that endpoint would silently turn
+		// AUTO/url-test into a manual selector after the first recovery.
+		lc.state.WatchdogAttempts++
+		if err := store.SaveState(lc.cfg.StateFile, lc.state); err != nil {
+			fmt.Fprintf(os.Stderr, "watchdog: persist attempt counter: %v\n", err)
+		}
+		fmt.Fprintf(os.Stderr, "watchdog: restarting Mihomo native policy (attempt %d/%d)\n",
+			lc.state.WatchdogAttempts, watchdogMaxAttempts)
+		return launchMihomo(ctx, lc, nil, false)
 	}
 
 	pick, ok := pickRecoveryTarget(lc)
@@ -308,6 +321,13 @@ func xrayHealthy(pidFile string, port int) bool {
 	}
 	_ = conn.Close()
 	return true
+}
+
+func coreHealthy(lc *loadCtx) bool {
+	if lc.cfg.IsMihomo() {
+		return mihomoHealthy(lc)
+	}
+	return xrayHealthy(lc.cfg.PIDFile, lc.cfg.XrayPort)
 }
 
 // pickRecoveryTarget chooses which server to relaunch on. Preference:
@@ -421,7 +441,7 @@ func handlePreSuspend(ctx context.Context) {
 	}
 
 	fmt.Fprintf(os.Stderr, "watchdog: pre-suspend cleanup (active=%s)\n", lc.state.Active.Name)
-	if lc.cfg.SystemWide {
+	if lc.cfg.SystemWide && !lc.cfg.IsMihomo() {
 		if err := sysmode.Stop(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "watchdog: pre-suspend sysmode.Stop: %v\n", err)
 		}
@@ -475,20 +495,27 @@ func handlePostResume(ctx context.Context) {
 	lc.state.WatchdogPausedUntil = time.Time{}
 
 	target := *lc.state.Active
+	targetLabel := target.Name
+	if lc.cfg.IsMihomo() {
+		targetLabel = "Mihomo native policy"
+	}
 	// If the cached server vanished (subscription refreshed during
 	// the previous session, name changed), fall through to the
 	// existing recovery picker.
-	if _, _, err := findServer(lc.cache, target.Name); err != nil {
-		pick, ok := pickRecoveryTarget(lc)
-		if !ok {
-			until := time.Now().Add(watchdogPauseCooldown)
-			fmt.Fprintf(os.Stderr, "watchdog: post-resume no live target; pausing until %s (active=%s preserved)\n",
-				until.Format(time.RFC3339), lc.state.Active.Name)
-			lc.state.WatchdogPausedUntil = until
-			_ = store.SaveState(lc.cfg.StateFile, lc.state)
-			return
+	if !lc.cfg.IsMihomo() {
+		if _, _, err := findServer(lc.cache, target.Name); err != nil {
+			pick, ok := pickRecoveryTarget(lc)
+			if !ok {
+				until := time.Now().Add(watchdogPauseCooldown)
+				fmt.Fprintf(os.Stderr, "watchdog: post-resume no live target; pausing until %s (active=%s preserved)\n",
+					until.Format(time.RFC3339), lc.state.Active.Name)
+				lc.state.WatchdogPausedUntil = until
+				_ = store.SaveState(lc.cfg.StateFile, lc.state)
+				return
+			}
+			target = pick
+			targetLabel = target.Name
 		}
-		target = pick
 	}
 
 	// Retry with backoff. Network can still be settling for several
@@ -508,13 +535,19 @@ func handlePostResume(ctx context.Context) {
 			}
 		}
 		fmt.Fprintf(os.Stderr, "watchdog: post-resume reconnect attempt %d/%d to %s\n",
-			i+1, len(backoff), target.Name)
-		if err := launch(ctx, lc, target, true); err != nil {
-			lastErr = err
-			fmt.Fprintf(os.Stderr, "watchdog: post-resume launch failed: %v\n", err)
+			i+1, len(backoff), targetLabel)
+		var launchErr error
+		if lc.cfg.IsMihomo() {
+			launchErr = launchMihomo(ctx, lc, nil, true)
+		} else {
+			launchErr = launch(ctx, lc, target, true)
+		}
+		if launchErr != nil {
+			lastErr = launchErr
+			fmt.Fprintf(os.Stderr, "watchdog: post-resume launch failed: %v\n", launchErr)
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "watchdog: post-resume reconnected to %s\n", target.Name)
+		fmt.Fprintf(os.Stderr, "watchdog: post-resume reconnected to %s\n", targetLabel)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "watchdog: post-resume all %d attempts failed (last: %v); tick loop will continue retrying\n",

@@ -1,5 +1,5 @@
 [Unit]
-Description=xray-waybar — auto-reconnect watchdog (detects dead/stuck xray)
+Description=xray-waybar — auto-reconnect watchdog (Xray/Mihomo)
 # Long-lived daemon: ticks internally every --loop interval instead of
 # being driven by a timer. Avoids `Started/Finished` log spam and the
 # fork/exec cost of spawning a Go process every 10 seconds.

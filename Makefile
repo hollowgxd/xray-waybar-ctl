@@ -3,7 +3,7 @@ PREFIX   ?= $(HOME)/.local
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: build install uninstall install-system uninstall-system install-monitor uninstall-monitor test vet tidy clean run-status
+.PHONY: build install uninstall install-system uninstall-system install-mihomo-cap uninstall-mihomo-cap install-monitor uninstall-monitor test test-install vet tidy clean run-status
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/xray-waybar-ctl
@@ -44,6 +44,24 @@ install-system:
 	@echo "  Add `system_wide: true` to ~/.config/xray-waybar/app.yaml,"
 	@echo "  ensure your user is in the `wheel` group, then:"
 	@echo "    xray-waybar-ctl connect"
+
+# Grants the external Mihomo binary only the capability required by its
+# native Linux TUN auto-route mode. The pacman hook reapplies it on upgrade.
+install-mihomo-cap:
+	@if [ "$$(id -u)" != "0" ]; then \
+	  echo "install-mihomo-cap must run as root: sudo make install-mihomo-cap"; exit 1; \
+	fi
+	@test -x /usr/bin/mihomo || { echo "/usr/bin/mihomo not found"; exit 1; }
+	install -Dm644 configs/pacman/mihomo-waybar.hook /etc/pacman.d/hooks/mihomo-waybar.hook
+	setcap cap_net_admin+ep /usr/bin/mihomo
+	@echo "✓ cap_net_admin set on /usr/bin/mihomo (auto-reapplied by pacman hook)."
+
+uninstall-mihomo-cap:
+	@if [ "$$(id -u)" != "0" ]; then \
+	  echo "uninstall-mihomo-cap must run as root"; exit 1; \
+	fi
+	rm -f /etc/pacman.d/hooks/mihomo-waybar.hook
+	-setcap -r /usr/bin/mihomo 2>/dev/null
 
 # Installs the user-session monitoring:
 #   - xray-waybar-ping.timer       (every 30s) — keeps state.Results fresh for menu/tooltip
@@ -102,6 +120,9 @@ uninstall-system:
 
 test:
 	go test ./...
+
+test-install:
+	bash scripts/install-smoke.sh
 
 vet:
 	go vet ./...

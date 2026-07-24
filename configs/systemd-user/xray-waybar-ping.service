@@ -1,5 +1,5 @@
 [Unit]
-Description=xray-waybar — periodic TCP liveness check of cached servers
+Description=xray-waybar — periodic proxy liveness/API check
 
 [Service]
 Type=oneshot
