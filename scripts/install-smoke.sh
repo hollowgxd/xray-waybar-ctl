@@ -60,6 +60,23 @@ config_after="$(sha256sum "$config" | awk '{print $1}')"
 test "$config_before" = "$config_after"
 test "$(find "${smoke_root}/waybar" -maxdepth 1 -name 'config.jsonc.xray-waybar-backup-*' | wc -l)" = "1"
 
+# Simulate an installation over the legacy Xray config that caused a
+# graphical polkit password prompt on every Waybar click. The updater
+# must migrate only the backend fields while retaining the secret URL.
+sed -i \
+  -e 's/^core: mihomo$/core: xray/' \
+  -e 's|^mihomo_bin:.*$|mihomo_bin: /usr/bin/mihomo|' \
+  -e 's/^system_wide: false$/system_wide: true/' \
+  "$config"
+env "${common_env[@]}" bash "${repo_root}/install.sh" \
+  --yes --no-tun --no-connect \
+  --waybar-config "${smoke_root}/waybar/config.jsonc"
+grep -Fq "core: mihomo" "$config"
+grep -Fq "mihomo_bin: '${smoke_root}/prefix/lib/xray-waybar/mihomo'" "$config"
+grep -Fq "system_wide: false" "$config"
+grep -Fq "https://example.test/sub/secret-token" "$config"
+test "$(find "${smoke_root}/config/xray-waybar" -maxdepth 1 -name 'app.yaml.before-mihomo-*' | wc -l)" = "1"
+
 bash -n "${repo_root}/install.sh"
 bash -n "${repo_root}/scripts/build-release.sh"
 printf 'install smoke: ok\n'

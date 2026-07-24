@@ -24,13 +24,14 @@ CLI на Go, который управляет `xray-core` **или** `mihomo` �
 На Linux x86-64/ARM64 запусти мастер:
 
 ```sh
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.3/install.sh)
 ```
 
 Он сам:
 
 - скачает проверенные готовые бинарники `xray-waybar-ctl` и официального Mihomo;
 - спросит URL подписки и сохранит конфиг с правами `0600`;
+- безопасно переведёт существующий Xray-конфиг на Mihomo, сохранив backup;
 - по умолчанию включит native Mihomo TUN для всей системы;
 - установит user-systemd watchdog и периодическую проверку соединения;
 - сразу проверит подписку и попробует подключиться;
@@ -46,18 +47,18 @@ Go, клонирование репозитория и ручное редакт
 
 ```sh
 # установить без первого подключения
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --no-connect
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.3/install.sh) --no-connect
 
 # локальный HTTP/SOCKS вместо системного VPN/TUN
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --no-tun
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.3/install.sh) --no-tun
 
 # поставить значок слева или вообще не менять Waybar
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --waybar-position left
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --waybar-config ~/.config/waybar/my-config.jsonc
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --no-waybar
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.3/install.sh) --waybar-position left
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.3/install.sh) --waybar-config ~/.config/waybar/my-config.jsonc
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.3/install.sh) --no-waybar
 
 # удалить программу, сохранив конфиг и кэш
-bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.2/install.sh) --uninstall
+bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.0-canary.3/install.sh) --uninstall
 ```
 
 Интеграция не добавляет CSS и не привязывает пользователя к оформлению
@@ -67,6 +68,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0
 Комментарии и существующее форматирование JSONC сохраняются. Повторная
 установка не дублирует модуль и не перезаписывает его пользовательские
 настройки.
+
+Действия по умолчанию:
+
+- левый клик — список серверов через первый найденный
+  `walker` / `wofi` / `rofi` / `fuzzel`;
+- правый клик — включить или выключить VPN;
+- средний клик — переподключиться;
+- колесо — быстро перейти к следующему/предыдущему серверу.
+
+Если ни одного launcher нет, левый клик просто переключает на следующий
+сервер и не требует дополнительной зависимости.
 
 Вручную повторить интеграцию или выбрать позицию/конфиг:
 
@@ -277,17 +289,18 @@ journalctl --user -u xray-waybar-watchdog.service -f
 
 ## Меню переключения
 
-Команда `xray-waybar-ctl menu` поднимает `walker --dmenu` со списком
-серверов. Выбор сервера → `use`. В Xray режиме первой строкой также идёт
-`Profile: …` → второй walker с вариантами `routing_profile`
+Команда `xray-waybar-ctl menu` открывает список серверов через первый
+доступный `walker`, `wofi`, `rofi` или `fuzzel`. Выбор сервера → `use`.
+В Xray режиме первой строкой также идёт `Profile: …` → второй список
+с вариантами `routing_profile`
 (proxy-all / direct / smart / whitelist / custom URL). Запись идёт в
 `state.json` и перебивает значение из `app.yaml` до
 `xray-waybar-ctl profile reset`. В Mihomo режиме routing приходит из YAML,
 поэтому Xray-подменю скрыто; provider-узлы появляются после первого `connect`.
 
 Биндить на хоткей оконного менеджера или на `on-click` модуля Waybar.
-`walker` должен быть в `$PATH` — иначе `menu` вернёт ошибку, остальной
-CLI работает.
+Если ни одного launcher нет, `menu` в серверном режиме безопасно
+переключает на следующий узел.
 
 ## Waybar
 
@@ -298,14 +311,15 @@ CLI работает.
     "exec": "xray-waybar-ctl status",
     "interval": 5,
     "return-type": "json",
-    "on-click":        "xray-waybar-ctl toggle",
-    "on-click-right":  "xray-waybar-ctl reconnect",
+    "on-click":        "xray-waybar-ctl menu",
+    "on-click-right":  "xray-waybar-ctl toggle",
+    "on-click-middle": "xray-waybar-ctl reconnect",
     "on-scroll-up":    "xray-waybar-ctl use-next",
     "on-scroll-down": "xray-waybar-ctl use-prev"
 }
 ```
 
-`~/.config/waybar/style.css`:
+Необязательная ручная стилизация в `~/.config/waybar/style.css`:
 
 ```css
 #custom-vpn               { color: @disabled-color; padding: 0 8px; }

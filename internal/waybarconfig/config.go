@@ -47,6 +47,7 @@ type parser struct {
 
 type edit struct {
 	pos  int
+	end  int
 	text string
 }
 
@@ -277,7 +278,8 @@ func Patch(src []byte, binaryPath, position string) ([]byte, bool, error) {
 		}
 	}
 
-	needDefinition := findProperty(target, moduleName) == nil
+	definitionProp := findProperty(target, moduleName)
+	needDefinition := definitionProp == nil
 	if needPositionProperty || needDefinition {
 		additions := make([]string, 0, 2)
 		if needPositionProperty {
@@ -292,6 +294,13 @@ func Patch(src []byte, binaryPath, position string) ([]byte, bool, error) {
 		}
 		edits = append(edits, objectEdits...)
 	}
+	if definitionProp != nil && definitionProp.value.kind == kindObject {
+		actionEdits, err := migrateManagedActions(src, definitionProp.value, binaryPath)
+		if err != nil {
+			return nil, false, err
+		}
+		edits = append(edits, actionEdits...)
+	}
 
 	if len(edits) == 0 {
 		return append([]byte(nil), src...), false, nil
@@ -303,12 +312,51 @@ func Patch(src []byte, binaryPath, position string) ([]byte, bool, error) {
 	}
 	out := append([]byte(nil), src...)
 	for _, e := range edits {
-		if e.pos < 0 || e.pos > len(out) {
+		end := e.end
+		if end == 0 {
+			end = e.pos
+		}
+		if e.pos < 0 || end < e.pos || end > len(out) {
 			return nil, false, errors.New("internal Waybar edit offset is invalid")
 		}
-		out = append(out[:e.pos], append([]byte(e.text), out[e.pos:]...)...)
+		out = append(out[:e.pos], append([]byte(e.text), out[end:]...)...)
 	}
 	return out, true, nil
+}
+
+func migrateManagedActions(src []byte, module *node, binaryPath string) ([]edit, error) {
+	legacy := map[string]string{
+		"on-click":       binaryPath + " toggle",
+		"on-click-right": binaryPath + " reconnect",
+	}
+	replacement := map[string]string{
+		"on-click":       binaryPath + " menu",
+		"on-click-right": binaryPath + " toggle",
+	}
+	var edits []edit
+	migrated := false
+	for key, oldValue := range legacy {
+		prop := findProperty(module, key)
+		if prop == nil || prop.value.kind != kindString || prop.value.text != oldValue {
+			continue
+		}
+		edits = append(edits, edit{
+			pos:  prop.value.start,
+			end:  prop.value.end,
+			text: strconv.Quote(replacement[key]),
+		})
+		migrated = true
+	}
+	if migrated && findProperty(module, "on-click-middle") == nil {
+		additions, err := appendObjectProperties(src, module, []string{
+			`"on-click-middle": ` + strconv.Quote(binaryPath+" reconnect"),
+		})
+		if err != nil {
+			return nil, err
+		}
+		edits = append(edits, additions...)
+	}
+	return edits, nil
 }
 
 func selectBarObject(root *node, position string) *node {
@@ -438,8 +486,9 @@ func moduleDefinition(binaryPath string) string {
 		"  \"return-type\": \"json\",",
 		"  \"interval\": 5,",
 		"  \"format\": \"{}\",",
-		"  \"on-click\": " + command("toggle") + ",",
-		"  \"on-click-right\": " + command("reconnect") + ",",
+		"  \"on-click\": " + command("menu") + ",",
+		"  \"on-click-right\": " + command("toggle") + ",",
+		"  \"on-click-middle\": " + command("reconnect") + ",",
 		"  \"on-scroll-up\": " + command("use-next") + ",",
 		"  \"on-scroll-down\": " + command("use-prev"),
 		"}",

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -477,7 +478,15 @@ func cmdMenu(ctx context.Context) error {
 		fmt.Fprintf(&lines, "%s%s%s%s%s%s\n", prefix, marker, menuSep, s.Name, menuSep, info)
 	}
 
-	choice, err := runWalker(ctx, lines.String(), "Pick a server", currentIdx)
+	choice, err := runChooser(ctx, lines.String(), "Pick a server", currentIdx)
+	if errors.Is(err, errNoMenuLauncher) {
+		// A minimal Hyprland setup may have Waybar but no dmenu frontend.
+		// Keep left click useful: advance to the next node instead of
+		// silently doing nothing. Once walker/wofi/rofi/fuzzel appears,
+		// the same command automatically starts showing a picker.
+		fmt.Fprintln(os.Stderr, "warn: no menu launcher found; switching to the next server")
+		return cmdUseDir(ctx, +1)
+	}
 	if err != nil || choice == "" {
 		return err
 	}
@@ -523,7 +532,7 @@ func cmdMenuProfiles(ctx context.Context) error {
 		// one continuous walker session.
 		fmt.Fprintf(&lines, "%s%s%s%s%s\n", profileMenuMarker, menuSep, p, menuSep, tag)
 	}
-	choice, err := runWalker(ctx, lines.String(), "Routing profile", currentIdx)
+	choice, err := runChooser(ctx, lines.String(), "Routing profile", currentIdx)
 	if err != nil || choice == "" {
 		return err
 	}
@@ -535,23 +544,55 @@ func cmdMenuProfiles(ctx context.Context) error {
 	return cmdProfile(ctx, []string{name})
 }
 
-// runWalker is the small wrapper around `walker --dmenu` shared by the
-// server and profile menus. Esc / no selection produces empty stdout
-// and we return ("", nil); a real spawn failure (walker not on PATH,
-// killed by ctx) now surfaces instead of being swallowed as Esc — that
-// previously hid the very bug this comment is about.
-//
-// currentIdx is the 0-based line index to preselect, or -1 for none.
-// Walker's --current takes an integer, NOT a string match — passing a
-// name like "smart" makes walker exit with `Cannot parse integer value`
-// and, in a detached child whose stderr is /dev/null, the menu just
-// silently never appears.
-func runWalker(ctx context.Context, stdin, placeholder string, currentIdx int) (string, error) {
-	args := []string{"--dmenu", "--placeholder", placeholder}
-	if currentIdx >= 0 {
-		args = append(args, "--current", strconv.Itoa(currentIdx))
+var errNoMenuLauncher = errors.New("no menu launcher found (install walker, wofi, rofi or fuzzel)")
+
+// runChooser uses the first dmenu frontend already present on the desktop.
+// It deliberately does not force one launcher dependency on every Hyprland
+// setup. Esc / no selection produces empty stdout and is not an error.
+func runChooser(ctx context.Context, stdin, placeholder string, currentIdx int) (string, error) {
+	type candidate struct {
+		name string
+		args func() []string
 	}
-	cmd := exec.CommandContext(ctx, "walker", args...)
+	candidates := []candidate{
+		{name: "walker", args: func() []string {
+			args := []string{"--dmenu", "--placeholder", placeholder}
+			if currentIdx >= 0 {
+				args = append(args, "--current", strconv.Itoa(currentIdx))
+			}
+			return args
+		}},
+		{name: "wofi", args: func() []string {
+			return []string{"--dmenu", "--prompt", placeholder}
+		}},
+		{name: "rofi", args: func() []string {
+			args := []string{"-dmenu", "-p", placeholder}
+			if currentIdx >= 0 {
+				args = append(args, "-selected-row", strconv.Itoa(currentIdx))
+			}
+			return args
+		}},
+		{name: "fuzzel", args: func() []string {
+			return []string{"--dmenu", "--prompt", placeholder + ": "}
+		}},
+	}
+
+	var path string
+	var args []string
+	for _, item := range candidates {
+		resolved, err := exec.LookPath(item.name)
+		if err != nil {
+			continue
+		}
+		path = resolved
+		args = item.args()
+		break
+	}
+	if path == "" {
+		return "", errNoMenuLauncher
+	}
+
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -560,9 +601,16 @@ func runWalker(ctx context.Context, stdin, placeholder string, currentIdx int) (
 			// Non-zero exit: walker convention for "user dismissed".
 			return "", nil
 		}
-		return "", fmt.Errorf("walker: %w", err)
+		return "", fmt.Errorf("%s: %w", filepathBase(path), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func filepathBase(path string) string {
+	if idx := strings.LastIndexByte(path, '/'); idx >= 0 {
+		return path[idx+1:]
+	}
+	return path
 }
 
 // spawnDetached re-execs this binary with the given subcommand as a

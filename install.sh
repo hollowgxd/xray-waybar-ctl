@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # systemd for the optional watchdog.
 
 REPO="${XRAY_WAYBAR_REPO:-hollowgxd/xray-waybar-ctl}"
-CTL_VERSION="${XRAY_WAYBAR_VERSION:-v0.1.0-canary.2}"
+CTL_VERSION="${XRAY_WAYBAR_VERSION:-v0.1.0-canary.3}"
 MIHOMO_VERSION="${XRAY_WAYBAR_MIHOMO_VERSION:-v1.19.29}"
 
 PREFIX="${XRAY_WAYBAR_PREFIX:-${HOME}/.local}"
@@ -287,8 +287,9 @@ write_waybar_snippets() {
     "exec": "${BIN_DIR}/xray-waybar-ctl status",
     "interval": 5,
     "return-type": "json",
-    "on-click": "${BIN_DIR}/xray-waybar-ctl toggle",
-    "on-click-right": "${BIN_DIR}/xray-waybar-ctl reconnect",
+    "on-click": "${BIN_DIR}/xray-waybar-ctl menu",
+    "on-click-right": "${BIN_DIR}/xray-waybar-ctl toggle",
+    "on-click-middle": "${BIN_DIR}/xray-waybar-ctl reconnect",
     "on-scroll-up": "${BIN_DIR}/xray-waybar-ctl use-next",
     "on-scroll-down": "${BIN_DIR}/xray-waybar-ctl use-prev"
 }
@@ -300,9 +301,65 @@ yaml_quote() {
   printf "'%s'" "$value"
 }
 
+migrate_existing_config() {
+  local target tmp backup
+  target="$(readlink -f -- "$APP_CONFIG")" ||
+    die "не удалось определить реальный путь существующего конфига: $APP_CONFIG"
+  tmp="$(mktemp "${target}.mihomo.XXXXXX")"
+
+  local core_line bin_line system_line
+  core_line="core: mihomo"
+  bin_line="mihomo_bin: $(yaml_quote "$MIHOMO_BIN")"
+  system_line="system_wide: ${ENABLE_TUN}"
+
+  if ! awk \
+    -v core_line="$core_line" \
+    -v bin_line="$bin_line" \
+    -v system_line="$system_line" '
+      BEGIN { core_seen=0; bin_seen=0; system_seen=0 }
+      /^core[[:space:]]*:/ {
+        if (!core_seen) print core_line
+        core_seen=1
+        next
+      }
+      /^mihomo_bin[[:space:]]*:/ {
+        if (!bin_seen) print bin_line
+        bin_seen=1
+        next
+      }
+      /^system_wide[[:space:]]*:/ {
+        if (!system_seen) print system_line
+        system_seen=1
+        next
+      }
+      { print }
+      END {
+        if (!core_seen) print core_line
+        if (!bin_seen) print bin_line
+        if (!system_seen) print system_line
+      }
+    ' "$target" >"$tmp"; then
+    rm -f "$tmp"
+    die "не удалось подготовить Mihomo-конфиг"
+  fi
+
+  if cmp -s "$target" "$tmp"; then
+    rm -f "$tmp"
+    ok "Существующий конфиг уже использует установленный Mihomo."
+    return 0
+  fi
+
+  backup="${target}.before-mihomo-$(date +%Y%m%d-%H%M%S)"
+  cp -p -- "$target" "$backup"
+  chmod 600 "$tmp"
+  mv -f -- "$tmp" "$target"
+  ok "Существующий конфиг переведён на Mihomo: $APP_CONFIG"
+  ok "Backup: $backup"
+}
+
 write_config_if_missing() {
   if [[ -f "$APP_CONFIG" ]]; then
-    warn "Существующий конфиг сохранён без изменений: $APP_CONFIG"
+    migrate_existing_config
     return 0
   fi
 
@@ -448,6 +505,9 @@ if "$ENABLE_TUN"; then
   fi
   privileged install -Dm755 "$MIHOMO_TMP" "$SYSTEM_MIHOMO_BIN"
   privileged setcap cap_net_admin+ep "$SYSTEM_MIHOMO_BIN"
+  CAP_STATE="$(getcap "$SYSTEM_MIHOMO_BIN" 2>/dev/null || true)"
+  [[ "$CAP_STATE" == *"cap_net_admin"* ]] ||
+    die "файловая система не сохранила cap_net_admin для Mihomo; попробуй --no-tun"
   MIHOMO_BIN="$SYSTEM_MIHOMO_BIN"
   ok "Mihomo установлен с минимальной capability cap_net_admin."
 else

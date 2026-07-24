@@ -71,6 +71,38 @@ func TestPatchKeepsExistingCustomizationAndPlacement(t *testing.T) {
 	}
 }
 
+func TestPatchMigratesManagedCanary2Actions(t *testing.T) {
+	const binary = "/home/test/.local/bin/xray-waybar-ctl"
+	src := []byte(`{
+  "modules-right": ["custom/vpn"],
+  "custom/vpn": {
+    "exec": "/home/test/.local/bin/xray-waybar-ctl status",
+    "on-click": "/home/test/.local/bin/xray-waybar-ctl toggle",
+    "on-click-right": "/home/test/.local/bin/xray-waybar-ctl reconnect"
+  }
+}`)
+	out, changed, err := Patch(src, binary, "right")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("legacy generated actions were not migrated")
+	}
+	text := string(out)
+	for _, want := range []string{
+		`"on-click": "/home/test/.local/bin/xray-waybar-ctl menu"`,
+		`"on-click-right": "/home/test/.local/bin/xray-waybar-ctl toggle"`,
+		`"on-click-middle": "/home/test/.local/bin/xray-waybar-ctl reconnect"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q:\n%s", want, text)
+		}
+	}
+	if _, changed, err := Patch(out, binary, "right"); err != nil || changed {
+		t.Fatalf("migration is not idempotent: changed=%v err=%v", changed, err)
+	}
+}
+
 func TestPatchTopLevelArraySelectsObjectWithModulesRight(t *testing.T) {
 	src := []byte(`[
   {"name": "left-only", "modules-left": ["clock"]},
