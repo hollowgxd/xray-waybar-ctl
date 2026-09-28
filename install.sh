@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/master/install.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.2/install.sh | bash
 set -euo pipefail
 
 REPO="hollowgxd/xray-waybar-ctl"
@@ -63,15 +63,22 @@ if [[ -z "$SOURCE_DIR" || ! -f "$SOURCE_DIR/go.mod" || ! -f "$SOURCE_DIR/scripts
     if [[ -n "$RELEASE_ARCH" ]] && command -v sha256sum >/dev/null 2>&1 && \
        curl --fail --location --silent --show-error --retry 2 \
          "https://api.github.com/repos/$REPO/releases/latest" -o "$WORK_DIR/release.json"; then
-      RELEASE_TAG="$(python3 - "$WORK_DIR/release.json" <<'PY_RELEASE'
+      RELEASE_INFO="$(python3 - "$WORK_DIR/release.json" "$RELEASE_ARCH" <<'PY_RELEASE'
 import json, sys
 try:
-    print(json.load(open(sys.argv[1]))['tag_name'])
-except (KeyError, ValueError):
+    release = json.load(open(sys.argv[1]))
+    name = "xray-waybar-ctl-linux-" + sys.argv[2]
+    asset = next(a for a in release["assets"] if a["name"] == name)
+    digest = asset["digest"]
+    print(release["tag_name"] + "\t" + (digest[7:] if digest.startswith("sha256:") else ""))
+except (KeyError, ValueError, StopIteration):
     pass
 PY_RELEASE
 )"
-      if [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      RELEASE_TAG="${RELEASE_INFO%%$'\t'*}"
+      RELEASE_DIGEST="${RELEASE_INFO#*$'\t'}"
+      if [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ &&
+            "$RELEASE_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
         REF="$RELEASE_TAG"
         USE_RELEASE=1
         RELEASE_ASSET="xray-waybar-ctl-linux-$RELEASE_ARCH"
@@ -97,11 +104,10 @@ if ((REPLACE_HAPP)); then INTEGRATE+=(--replace-happ); fi
 if ((USE_RELEASE)); then
   RELEASE_URL="https://github.com/$REPO/releases/download/$REF"
   echo "Installing verified release $REF ($RELEASE_ARCH)..."
-  curl --fail --location --silent --show-error --retry 3 \
+  curl --fail --location --silent --show-error --connect-timeout 10 --max-time 120 --retry 2 \
     "$RELEASE_URL/$RELEASE_ASSET" -o "$WORK_DIR/$RELEASE_ASSET"
-  curl --fail --location --silent --show-error --retry 3 \
-    "$RELEASE_URL/$RELEASE_ASSET.sha256" -o "$WORK_DIR/$RELEASE_ASSET.sha256"
-  (cd "$WORK_DIR" && sha256sum --check --status "$RELEASE_ASSET.sha256") || {
+  (cd "$WORK_DIR" && printf '%s  %s\n' "$RELEASE_DIGEST" "$RELEASE_ASSET" \
+    | sha256sum --check --status) || {
     echo 'Release checksum verification failed.' >&2
     exit 1
   }

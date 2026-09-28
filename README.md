@@ -24,10 +24,10 @@ Go нужен только для сборки из исходников или 
 нужен только для отдельного system-wide режима.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.2/install.sh | bash
 ```
 
-Команда скачивает релиз и его исходники (или собирает CLI из исходников), кладёт его в
+Команда использует закреплённый установщик, скачивает последний стабильный релиз и его исходники (или собирает CLI из исходников), кладёт его в
 `~/.local/bin/xray-waybar-ctl` и **сама добавляет** `custom/xray` в активный
 `~/.config/waybar/config` (или `config.jsonc`) и стиль в `style.css`.
 Изменённые файлы Waybar получают бэкап рядом с собой. Повторный запуск
@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/master/in
 Если в панели уже стоит HAPP и его нужно заменить **только в списке модулей**:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/master/install.sh | bash -s -- --replace-happ
+curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.2/install.sh | bash -s -- --replace-happ
 ```
 
 Скрипты/стиль HAPP сохраняются; они просто перестают использоваться в панели.
