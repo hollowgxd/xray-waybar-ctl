@@ -14,77 +14,79 @@ CLI на Go, который управляет `xray-core` и отдаёт ст�
 - Печатает JSON для Waybar (`connected` / `disconnected` / `loading` / `error`).
 - Команды переключения: `use <name>`, `use-next`, `use-prev`, `reconnect`, `toggle`.
 
-## Установка
+## Быстрая установка в Waybar
 
-Нужно поставить:
-
-- `xray-core` — основной демон
-- `waybar` — куда выводится статус
-- `walker` — dmenu-лаунчер для встроенного меню переключения серверов
-  (`xray-waybar-ctl menu`)
-- Go ≥ 1.21 — для сборки
-- `tun2socks` — только если планируется `system_wide: true`
-
-На Arch это всё в `pacman`/AUR (`yay -S xray waybar walker-bin tun2socks go`).
-На Debian/Ubuntu/Fedora — штатный пакетный менеджер; `walker` и `tun2socks`
-если в репах нет, берутся из релизов:
-<https://github.com/abenz1267/walker>,
-<https://github.com/xjasonlyu/tun2socks/releases>.
+Нужны **Linux с Waybar**, `xray`, `python3`, `curl` и `tar`. На x86-64
+и ARM64 установщик скачивает опубликованный бинарник и проверяет SHA-256;
+Go нужен только для сборки из исходников или неподдерживаемой архитектуры
+(`go.mod` сейчас требует Go 1.26.2). Для меню по правому клику подойдёт **любой один**
+из `walker`, `wofi`, `rofi`; остальное работает и без меню. `tun2socks`
+нужен только для отдельного system-wide режима.
 
 ```sh
-make install
+curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/master/install.sh | bash
 ```
 
-`make install` кладёт бинарь в `~/.local/bin/xray-waybar-ctl` и пример конфига
-в `~/.local/share/xray-waybar/app.yaml.example`. Убедись, что `~/.local/bin`
-есть в `$PATH`.
+Команда скачивает релиз и его исходники (или собирает CLI из исходников), кладёт его в
+`~/.local/bin/xray-waybar-ctl` и **сама добавляет** `custom/xray` в активный
+`~/.config/waybar/config` (или `config.jsonc`) и стиль в `style.css`.
+Изменённые файлы Waybar получают бэкап рядом с собой. Повторный запуск
+обновляет бинарник, но не плодит модули и не затирает существующий
+`~/.config/xray-waybar/app.yaml`. Никакого `sudo` и изменения сетевых
+маршрутов при установке нет.
 
-### Что предполагает проект
-
-- **systemd как init** — мониторинг и TUN-сайдкар поднимаются через
-  systemd-юниты (user-session и system). Без systemd `make install-monitor`
-  и `make install-system` не сработают; основной `connect/disconnect`
-  будет работать, но без автореконнекта и без TUN.
-- **logind на system D-Bus** — watchdog ловит `PrepareForSleep` от
-  `org.freedesktop.login1` для tear-down/resume. На системах без logind
-  (runit/OpenRC) suspend/resume в watchdog'е молча отключится, тики по
-  таймеру остаются.
-- **polkit + группа `wheel`** — нужны только для `system_wide: true`,
-  чтобы юзер мог поднимать `xray-waybar-tun.service` без пароля
-  (`configs/polkit/50-xray-waybar.rules`). На дистрибутивах, где
-  административная группа называется иначе (`sudo` в Debian),
-  отредактируй правило либо добавь себя в `wheel`:
-  `sudo groupadd -f wheel && sudo usermod -aG wheel "$USER"`.
-- **nerd-font на панели** — иконки в `internal/waybar` это
-  нерд-глифы. Если у тебя нет нерд-шрифта, в Waybar будут квадратики
-  — поставь любой nerd-font и пропиши его в `font-family` стиля
-  модуля.
-- **pacman-хук** (`configs/pacman/xray-waybar.hook`) реприменяет
-  `cap_net_admin` на `/usr/bin/xray` после `pacman -Syu`. На не-Arch
-  дистрибутивах хук не сработает — после обновления xray руками:
-  `sudo setcap cap_net_admin+ep /usr/bin/xray`.
-
-## Конфигурация
-
-Скопируй пример и подставь свой URL подписки:
+Если в панели уже стоит HAPP и его нужно заменить **только в списке модулей**:
 
 ```sh
-mkdir -p ~/.config/xray-waybar
-cp ~/.local/share/xray-waybar/app.yaml.example ~/.config/xray-waybar/app.yaml
-$EDITOR ~/.config/xray-waybar/app.yaml
+curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/master/install.sh | bash -s -- --replace-happ
 ```
 
-Минимально нужен только `subscription_url`. Все остальные поля имеют разумные дефолты —
-см. `configs/app.yaml.example`.
+Скрипты/стиль HAPP сохраняются; они просто перестают использоваться в панели.
+Чтобы установить из клона: `bash install.sh [--replace-happ]`.
+`--no-reload` оставит работающий Waybar без перезапуска. Исходный конфиг можно
+восстановить из `*.xray-waybar-backup-*` рядом с ним.
 
-Если `routing_profile` не `proxy-all` / `direct` — один раз нужно скачать
-geoip/geosite, иначе xray откажется стартовать:
+**Последний шаг — URL подписки.** На первой установке создаётся приватный
+`~/.config/xray-waybar/app.yaml` с пустым `subscription_url` и очевидным
+статусом ошибки в Waybar. Вставь свой URL в этот файл, затем:
 
 ```sh
-xray-waybar-ctl update-geo
+~/.local/bin/xray-waybar-ctl update
+~/.local/bin/xray-waybar-ctl connect
 ```
 
-Дальше это делает таймер `xray-waybar-geo.timer` из `make install-monitor`.
+URL и токен не передаются в командной строке установщика и не попадают в
+README/логи. По умолчанию запускается локальный SOCKS5 `127.0.0.1:1080`:
+**другие приложения не начнут пользоваться VPN автоматически**. Для всего
+трафика см. [System-wide режим](#system-wide-режим-весь-трафик-через-vpn).
+
+### Что делает модуль
+
+| Действие | Результат |
+| --- | --- |
+| Левый клик | Подключить / отключить |
+| Правый клик | Меню серверов и профилей (`walker`, `wofi` или `rofi`) |
+| Средний клик | Переподключить |
+| Колесо вверх / вниз | Следующий / предыдущий сервер |
+| Наведение | Сервер, endpoint, задержка, режим и время работы |
+
+Цвета: фиолетовый — отключено, зелёный — подключено, жёлтый — подключение,
+красный — ошибка или неактивный TUN. Блок CSS использует собственные цвета и
+не требует переменных чужой темы. Статус CLI отдаёт JSON прямо в Waybar,
+без HAPP и без GUI-клиента. Для пиктограмм нужен Nerd Font.
+
+### Ручная установка / конфигурация
+
+`make install` собирает CLI и пример конфига, **но не меняет Waybar**.
+Если нужен полностью ручной контроль, используй его и пример ниже. Для
+нестандартной конфигурации скопируй шаблон из
+`~/.local/share/xray-waybar/app.yaml.example` и настрой поля. Минимально
+требуется `subscription_url`; `routing_profile: proxy-all` работает без
+geoip/geosite. Для `smart`/`whitelist` запусти `xray-waybar-ctl update-geo`.
+
+Для `systemd`-мониторинга/автореконнекта есть отдельный
+`make install-monitor`. Он не включается установщиком автоматически и
+не нужен для обычного управления из Waybar.
 
 ## Использование
 
@@ -177,44 +179,39 @@ journalctl --user -u xray-waybar-watchdog.service -f
 
 ## Меню переключения
 
-Команда `xray-waybar-ctl menu` поднимает `walker --dmenu` со списком
+Команда `xray-waybar-ctl menu` поднимает dmenu-совместимый лаунчер со списком
 серверов; первой строкой — текущий профиль. Выбор сервера → `use`,
-выбор `Profile: …` → второй walker с вариантами `routing_profile`
+выбор `Profile: …` → второй экран меню с вариантами `routing_profile`
 (proxy-all / direct / smart / whitelist / custom URL). Запись идёт в
 `state.json` и перебивает значение из `app.yaml` до
 `xray-waybar-ctl profile reset`.
 
 Биндить на хоткей оконного менеджера или на `on-click` модуля Waybar.
-`walker` должен быть в `$PATH` — иначе `menu` вернёт ошибку, остальной
-CLI работает.
+`walker`, `wofi` или `rofi` должен быть в `$PATH` — иначе `menu`
+вернёт ошибку, остальной CLI работает.
 
-## Waybar
+## Ручное подключение Waybar
 
-`~/.config/waybar/config.jsonc`:
+Если не используешь `install.sh`, добавь `custom/xray` в нужный массив
+`modules-left`, `modules-center` или `modules-right`, а в корневой объект
+конфига Waybar — модуль:
 
 ```jsonc
-"custom/vpn": {
-    "exec": "xray-waybar-ctl status",
-    "interval": 5,
-    "return-type": "json",
-    "on-click":        "xray-waybar-ctl toggle",
-    "on-click-right":  "xray-waybar-ctl reconnect",
-    "on-scroll-up":    "xray-waybar-ctl use-next",
-    "on-scroll-down": "xray-waybar-ctl use-prev"
+"custom/xray": {
+  "exec": "~/.local/bin/xray-waybar-ctl status",
+  "return-type": "json",
+  "interval": 5,
+  "format": "{}",
+  "on-click": "~/.local/bin/xray-waybar-ctl toggle",
+  "on-click-right": "~/.local/bin/xray-waybar-ctl menu",
+  "on-click-middle": "~/.local/bin/xray-waybar-ctl reconnect",
+  "on-scroll-up": "~/.local/bin/xray-waybar-ctl use-next",
+  "on-scroll-down": "~/.local/bin/xray-waybar-ctl use-prev"
 }
 ```
 
-`~/.config/waybar/style.css`:
-
-```css
-#custom-vpn               { color: @disabled-color; padding: 0 8px; }
-#custom-vpn.connected     { color: @green; }
-#custom-vpn.loading       { color: @yellow; }
-#custom-vpn.error         { color: @red; }
-#custom-vpn.degraded      { color: @orange; }  /* system_wide=true но TUN не активен */
-```
-
-После правок: `pkill -SIGUSR2 waybar`.
+Стили: см. `scripts/waybar-integrate.py` или запусти установщик для
+автоматической интеграции. После ручных правок `pkill -SIGUSR2 waybar`.
 
 ## Разработка
 

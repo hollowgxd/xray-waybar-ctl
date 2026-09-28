@@ -509,34 +509,48 @@ func cmdMenuProfiles(ctx context.Context) error {
 	return cmdProfile(ctx, []string{name})
 }
 
-// runWalker is the small wrapper around `walker --dmenu` shared by the
-// server and profile menus. Esc / no selection produces empty stdout
-// and we return ("", nil); a real spawn failure (walker not on PATH,
-// killed by ctx) now surfaces instead of being swallowed as Esc — that
-// previously hid the very bug this comment is about.
-//
-// currentIdx is the 0-based line index to preselect, or -1 for none.
-// Walker's --current takes an integer, NOT a string match — passing a
-// name like "smart" makes walker exit with `Cannot parse integer value`
-// and, in a detached child whose stderr is /dev/null, the menu just
-// silently never appears.
+// runWalker opens the first available dmenu-compatible launcher. Walker gets
+// the current server preselected; wofi and rofi keep the menu usable on more
+// Wayland desktops without requiring a separate launcher installation.
 func runWalker(ctx context.Context, stdin, placeholder string, currentIdx int) (string, error) {
-	args := []string{"--dmenu", "--placeholder", placeholder}
-	if currentIdx >= 0 {
-		args = append(args, "--current", strconv.Itoa(currentIdx))
+	var launcher string
+	var args []string
+	switch {
+	case hasCommand("walker"):
+		launcher = "walker"
+		args = []string{"--dmenu", "--placeholder", placeholder}
+		if currentIdx >= 0 {
+			args = append(args, "--current", strconv.Itoa(currentIdx))
+		}
+	case hasCommand("wofi"):
+		launcher = "wofi"
+		args = []string{"--dmenu", "--prompt", placeholder}
+	case hasCommand("rofi"):
+		launcher = "rofi"
+		args = []string{"-dmenu", "-p", placeholder}
+		if currentIdx >= 0 {
+			args = append(args, "-selected-row", strconv.Itoa(currentIdx))
+		}
+	default:
+		return "", fmt.Errorf("no menu launcher found: install walker, wofi or rofi")
 	}
-	cmd := exec.CommandContext(ctx, "walker", args...)
+	cmd := exec.CommandContext(ctx, launcher, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
-			// Non-zero exit: walker convention for "user dismissed".
+			// Dmenu-compatible launchers exit non-zero when dismissed.
 			return "", nil
 		}
-		return "", fmt.Errorf("walker: %w", err)
+		return "", fmt.Errorf("%s: %w", launcher, err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func hasCommand(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 // spawnDetached re-execs this binary with the given subcommand as a
