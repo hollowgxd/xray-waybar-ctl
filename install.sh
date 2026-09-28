@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.2/install.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.3/install.sh | bash
 set -euo pipefail
 
 REPO="hollowgxd/xray-waybar-ctl"
@@ -12,7 +12,8 @@ usage() {
 Usage: bash install.sh [--replace-happ] [--no-reload]
 
 Installs the CLI into ~/.local/bin and adds custom/xray to your existing
-Waybar config. No sudo and no changes to VPN/network settings. Existing
+Waybar config. No sudo and no changes to VPN/network settings. Installs the
+official stable Xray binary into your home and verifies its SHA-256. Existing
 app.yaml is never overwritten. Changed Waybar files get timestamped backups.
 
 --replace-happ  Replace custom/happ in the Waybar module list (keeps its files)
@@ -35,7 +36,7 @@ if [[ $(id -u) -eq 0 ]]; then
   exit 1
 fi
 
-for cmd in python3 xray waybar curl tar; do
+for cmd in python3 waybar curl tar; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     printf 'Missing %s. Install it with your distribution package manager, then rerun.\n' "$cmd" >&2
     exit 1
@@ -49,7 +50,7 @@ USE_RELEASE=0
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-if [[ -z "$SOURCE_DIR" || ! -f "$SOURCE_DIR/go.mod" || ! -f "$SOURCE_DIR/scripts/waybar-integrate.py" ]]; then
+if [[ -z "$SOURCE_DIR" || ! -f "$SOURCE_DIR/go.mod" || ! -f "$SOURCE_DIR/scripts/waybar-integrate.py" || ! -f "$SOURCE_DIR/scripts/xray-core.py" ]]; then
   if [[ ! "$REF" =~ ^[a-zA-Z0-9._/-]+$ || "$REF" == *..* ]]; then
     echo 'XRAY_WAYBAR_REF contains invalid characters.' >&2
     exit 1
@@ -91,7 +92,7 @@ PY_RELEASE
   curl --fail --location --silent --show-error --retry 3 \
     "https://codeload.github.com/$REPO/tar.gz/$REF" \
     | tar -xz -C "$SOURCE_DIR" --strip-components=1
-  test -f "$SOURCE_DIR/go.mod" && test -f "$SOURCE_DIR/scripts/waybar-integrate.py"
+  test -f "$SOURCE_DIR/go.mod" && test -f "$SOURCE_DIR/scripts/waybar-integrate.py" && test -f "$SOURCE_DIR/scripts/xray-core.py"
 fi
 
 TARGET_BIN="$HOME/.local/bin/xray-waybar-ctl"
@@ -123,16 +124,12 @@ else
     -o "$WORK_DIR/xray-waybar-ctl" ./cmd/xray-waybar-ctl)
 fi
 "$WORK_DIR/xray-waybar-ctl" version
-mkdir -p "$(dirname "$TARGET_BIN")" "$CONFIG_DIR" "$HOME/.local/share/xray-waybar"
+python3 "$SOURCE_DIR/scripts/xray-core.py" --home "$HOME" \
+  --pin "$SOURCE_DIR/configs/xray-core-stable.json" --config "$CONFIG_FILE"
+mkdir -p "$(dirname "$TARGET_BIN")" "$HOME/.local/share/xray-waybar"
 install -m 755 "$WORK_DIR/xray-waybar-ctl" "$TARGET_BIN"
 install -m 644 "$SOURCE_DIR/configs/app.yaml.example" \
   "$HOME/.local/share/xray-waybar/app.yaml.example"
-if [[ ! -e "$CONFIG_FILE" ]]; then
-  (umask 077; printf '# Paste your subscription URL below, then run: xray-waybar-ctl update\nsubscription_url: ""\nxray_bin: "%s"\n' "$(command -v xray)" > "$CONFIG_FILE")
-  echo "Created $CONFIG_FILE (subscription URL still needed)."
-else
-  echo "Kept existing $CONFIG_FILE."
-fi
 "${INTEGRATE[@]}"
 if ((RELOAD)) && pgrep -u "$(id -u)" -x waybar >/dev/null 2>&1; then
   pkill -u "$(id -u)" -SIGUSR2 -x waybar || true

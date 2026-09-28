@@ -15,7 +15,8 @@ priority: []
 #   - "Server_RU_1"
 #   - "Server_DE_2"
 
-xray_bin: "/usr/bin/xray"
+# Путь для быстрой установки; при ручной системной установке укажи /usr/bin/xray.
+xray_bin: "~/.local/share/xray-waybar/core/xray"
 xray_config: "~/.config/xray-waybar/xray.json"
 xray_port: 1080      # локальный SOCKS5 порт основного инстанса
 xray_api_port: 8080  # порт Stats API (v3)

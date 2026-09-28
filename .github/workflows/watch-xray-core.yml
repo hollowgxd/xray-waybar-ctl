@@ -1,0 +1,38 @@
+name: Watch Xray-core stable releases
+
+on:
+  schedule:
+    - cron: '20 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check official stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/XTLS/Xray-core/releases/latest > "$RUNNER_TEMP/xray-release.json"
+          tag=$(python3 scripts/check-xray-release.py configs/xray-core-stable.json "$RUNNER_TEMP/xray-release.json")
+          if [[ -z "$tag" ]]; then
+            echo 'Pinned Xray stable version is current.'
+            exit 0
+          fi
+          title="Xray-core stable $tag is available"
+          if gh issue list --state all --search "$tag in:title" --limit 100 --json title --jq '.[].title' | grep -Fxq "$title"; then
+            echo "Issue already exists: $title"
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/xray-issue.md" <<EOF
+          A new [official stable Xray-core release](https://github.com/XTLS/Xray-core/releases/tag/$tag) is available.
+
+          Update configs/xray-core-stable.json with the new release tag and official asset SHA-256 digests for Linux amd64/arm64, run the installer checks, and publish a new xray-waybar-ctl release. The installer fetches GitHub's current stable release directly when available; this pin is its verified fallback.
+          EOF
+          gh issue create --title "$title" --body-file "$RUNNER_TEMP/xray-issue.md" --assignee hollowgxd
