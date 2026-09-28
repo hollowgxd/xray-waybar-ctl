@@ -106,6 +106,7 @@ if ((USE_RELEASE)); then
     exit 1
   }
   mv "$WORK_DIR/$RELEASE_ASSET" "$WORK_DIR/xray-waybar-ctl"
+  chmod 755 "$WORK_DIR/xray-waybar-ctl"
 else
   command -v go >/dev/null 2>&1 || {
     echo 'No compatible release found; install Go for source build, then rerun.' >&2
