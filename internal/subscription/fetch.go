@@ -2,9 +2,11 @@ package subscription
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -36,7 +38,11 @@ func Fetch(ctx context.Context, rawURL, hwid string) ([]byte, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("subscription: %w", err)
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return nil, fmt.Errorf("subscription: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -44,9 +50,12 @@ func Fetch(ctx context.Context, rawURL, hwid string) ([]byte, error) {
 		return nil, fmt.Errorf("subscription: HTTP %s", resp.Status)
 	}
 	const maxBody = 4 << 20 // 4 MiB is more than enough for any subscription
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("subscription: read body: %w", err)
+	}
+	if len(body) > maxBody {
+		return nil, fmt.Errorf("subscription: response exceeds %d bytes", maxBody)
 	}
 	return body, nil
 }

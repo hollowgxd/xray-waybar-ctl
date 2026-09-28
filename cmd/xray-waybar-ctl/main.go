@@ -43,7 +43,12 @@ Connection:
   reconnect         disconnect + connect
 
 Servers:
-  update            Re-fetch the subscription into the local cache
+  update            Re-fetch the active subscription into the local cache
+  subscription list                 List named subscriptions
+  subscription add NAME             Add a URL (prompt or stdin; no shell history)
+  subscription use NAME             Switch feeds; reconnect if running
+  subscription update [NAME]        Refresh one feed
+  subscription remove NAME          Remove an inactive feed
   list              Show cached servers
   test              URL-test every cached server, print latency table
   ping              TCP-only liveness check (cheap; used by systemd timer)
@@ -61,6 +66,7 @@ Waybar:
   status            Emit one line of JSON describing the current state
   menu              Open a dmenu picker of cached servers; selection → use
   menu-profiles     Open a dmenu picker of routing profiles (also reachable from menu)
+  menu-subscriptions Open a dmenu picker of subscriptions (also reachable from menu)
 
 Routing:
   profile [name]    Show or change routing profile. Without args: print
@@ -100,6 +106,16 @@ func run(ctx context.Context, args []string) error {
 		return cmdStatus(ctx)
 	case "menu":
 		return cmdMenu(ctx)
+	case "menu-subscriptions":
+		err := cmdMenuSubscriptions(ctx)
+		notifySubscriptionMenuError(err)
+		return err
+	case "menu-subscription-add":
+		err := cmdMenuSubscriptionAdd(ctx)
+		notifySubscriptionMenuError(err)
+		return err
+	case "subscription":
+		return cmdSubscription(ctx, args)
 	case "menu-profiles":
 		return cmdMenuProfiles(ctx)
 	case "connect":

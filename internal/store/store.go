@@ -28,20 +28,21 @@ func (c *Cache) Age() time.Duration { return time.Since(c.FetchedAt) }
 
 // TestResult is a single URL-test measurement for one server.
 type TestResult struct {
-	Name      string        `json:"name"`
-	Latency   time.Duration `json:"latency_ns"`
-	Alive     bool          `json:"alive"`
-	Error     string        `json:"error,omitempty"`
-	MeasuredAt time.Time    `json:"measured_at"`
+	Name       string        `json:"name"`
+	Latency    time.Duration `json:"latency_ns"`
+	Alive      bool          `json:"alive"`
+	Error      string        `json:"error,omitempty"`
+	MeasuredAt time.Time     `json:"measured_at"`
 }
 
 // State captures runtime information: which server is currently active,
 // and the most recent batch of test results.
 type State struct {
-	ConnectedAt time.Time             `json:"connected_at,omitempty"`
-	Active      *server.Server        `json:"active,omitempty"`
-	TestedAt    time.Time             `json:"tested_at,omitempty"`
-	Results     map[string]TestResult `json:"results,omitempty"`
+	Subscription string                `json:"subscription,omitempty"`
+	ConnectedAt  time.Time             `json:"connected_at,omitempty"`
+	Active       *server.Server        `json:"active,omitempty"`
+	TestedAt     time.Time             `json:"tested_at,omitempty"`
+	Results      map[string]TestResult `json:"results,omitempty"`
 
 	// WatchdogAttempts counts consecutive auto-reconnect attempts since
 	// the last healthy check. The watchdog pauses (sets WatchdogPausedUntil)
@@ -109,12 +110,17 @@ func readJSON(path string, v any) error {
 }
 
 func writeJSON(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("store: mkdir for %s: %w", path, err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("store: temp for %s: %w", path, err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
 	}
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")

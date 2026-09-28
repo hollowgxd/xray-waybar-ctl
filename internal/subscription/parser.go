@@ -21,6 +21,23 @@ func Parse(body []byte) ([]server.Server, []error) {
 	if isClashYAML(body) {
 		return parseClash(body)
 	}
+	trimmed := strings.TrimSpace(string(body))
+	if strings.HasPrefix(trimmed, "[") {
+		var entries []string
+		if err := json.Unmarshal([]byte(trimmed), &entries); err == nil {
+			var servers []server.Server
+			var errs []error
+			for i, entry := range entries {
+				s, e := ParseURI(strings.TrimSpace(entry))
+				if e != nil {
+					errs = append(errs, fmt.Errorf("entry %d: %w", i+1, e))
+				} else {
+					servers = append(servers, s)
+				}
+			}
+			return servers, errs
+		}
+	}
 	decoded := decodeBase64Loose(string(body))
 	lines := strings.Split(string(decoded), "\n")
 

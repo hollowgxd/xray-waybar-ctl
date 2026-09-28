@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -60,9 +61,12 @@ const xraySOMark = 0x29a
 // loadCtx is the bundle every command needs. It is reloaded per
 // invocation — the CLI is short-lived.
 type loadCtx struct {
-	cfg   *appconfig.Config
-	cache *store.Cache
-	state *store.State
+	cfg              *appconfig.Config
+	cache            *store.Cache
+	state            *store.State
+	registry         *subscription.Registry
+	cachePath        string
+	subscriptionName string
 }
 
 // loadAll reads config, cache and state. Cache and state default to
@@ -72,7 +76,17 @@ func loadAll() (*loadCtx, error) {
 	if err != nil {
 		return nil, err
 	}
-	cache, err := store.LoadCache(cfg.CacheFile)
+	registry, err := subscription.LoadRegistry(cfg.SubscriptionsFile, cfg.SubscriptionURL)
+	if err != nil {
+		return nil, err
+	}
+	if registry.Active == "" && len(registry.Items) > 0 {
+		registry.Active = registry.Names()[0]
+	}
+	name := registry.Active
+	cfg.SubscriptionURL = registry.Items[name]
+	cachePath := cachePathFor(cfg.CacheFile, name)
+	cache, err := store.LoadCache(cachePath)
 	if err != nil {
 		return nil, err
 	}
@@ -86,12 +100,28 @@ func loadAll() (*loadCtx, error) {
 	if state == nil {
 		state = &store.State{}
 	}
-	return &loadCtx{cfg: cfg, cache: cache, state: state}, nil
+	if state.Subscription != "" && state.Subscription != name {
+		// Prevent a previous feed's node and latency from masquerading as current.
+		state.Active = nil
+		state.Results = nil
+	}
+
+	return &loadCtx{cfg: cfg, cache: cache, state: state, registry: registry, cachePath: cachePath, subscriptionName: name}, nil
+}
+
+func cachePathFor(base, name string) string {
+	if name == "default" {
+		return base
+	}
+	return filepath.Join(filepath.Dir(base), "subscriptions", name+".json")
 }
 
 // ensureFreshCache fetches the subscription if the cache is missing or
 // older than the configured interval. force=true ignores the interval.
 func ensureFreshCache(ctx context.Context, lc *loadCtx, force bool) error {
+	if lc.cfg.SubscriptionURL == "" {
+		return errors.New("no subscription configured; run `xray-waybar-ctl subscription add NAME` or select one in the Waybar menu")
+	}
 	stale := force ||
 		len(lc.cache.Servers) == 0 ||
 		lc.cache.SourceURL != lc.cfg.SubscriptionURL ||
@@ -118,7 +148,12 @@ func ensureFreshCache(ctx context.Context, lc *loadCtx, force bool) error {
 	}
 	servers, errs := subscription.Parse(body)
 	if len(servers) == 0 {
-		return fmt.Errorf("subscription returned no usable servers: %v", errs)
+		detail := subscription.EmptyReason(body, errs)
+		if len(lc.cache.Servers) > 0 && lc.cache.SourceURL == lc.cfg.SubscriptionURL {
+			fmt.Fprintf(os.Stderr, "warn: %s; using last good cache\n", detail)
+			return nil
+		}
+		return fmt.Errorf("subscription %q: %s", lc.subscriptionName, detail)
 	}
 	for _, e := range errs {
 		fmt.Fprintln(os.Stderr, "warn:", e)
@@ -128,7 +163,7 @@ func ensureFreshCache(ctx context.Context, lc *loadCtx, force bool) error {
 		SourceURL: lc.cfg.SubscriptionURL,
 		Servers:   servers,
 	}
-	return store.SaveCache(lc.cfg.CacheFile, lc.cache)
+	return store.SaveCache(lc.cachePath, lc.cache)
 }
 
 // findServer returns the cached server with the given name (fragment).
@@ -239,6 +274,7 @@ func launch(ctx context.Context, lc *loadCtx, s server.Server, resetFailures boo
 	}
 
 	now := time.Now()
+	lc.state.Subscription = lc.subscriptionName
 	lc.state.Active = &s
 	lc.state.ConnectedAt = now
 	// Only a user-initiated launch invalidates the watchdog's failure

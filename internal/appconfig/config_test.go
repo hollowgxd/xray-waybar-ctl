@@ -33,13 +33,13 @@ func TestLoad_AppliesDefaultsAndExpandsHome(t *testing.T) {
 	}
 }
 
-func TestLoad_RequiresSubscriptionURL(t *testing.T) {
+func TestLoad_AllowsSubscriptionSetup(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "app.yaml")
 	if err := os.WriteFile(cfgPath, []byte("xray_port: 9999\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Load(cfgPath); err == nil {
-		t.Fatal("expected error without subscription_url")
+	if _, _, err := Load(cfgPath); err != nil {
+		t.Fatalf("empty subscription should allow setup: %v", err)
 	}
 }

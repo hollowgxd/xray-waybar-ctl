@@ -53,16 +53,25 @@ func cmdStatus(_ context.Context) error {
 		return nil
 	}
 
+	if lc.subscriptionName == "" {
+		emitWaybar(waybar.Error("No subscription. Right-click → Subscriptions → Add URL"))
+		return nil
+	}
 	running, _ := process.IsRunning(lc.cfg.PIDFile)
 	if !running || lc.state.Active == nil {
-		emitWaybar(waybar.Disconnected())
+		status := waybar.Disconnected()
+		if lc.subscriptionName != "" {
+			status.Tooltip += "\nSubscription: " + lc.subscriptionName
+		}
+		emitWaybar(status)
 		return nil
 	}
 	opt := waybar.ConnectedOptions{
-		LocalPort:   lc.cfg.XrayPort,
-		ConnectedAt: lc.state.ConnectedAt,
-		SystemWide:  lc.cfg.SystemWide,
-		Profile:     activeProfile(lc),
+		LocalPort:    lc.cfg.XrayPort,
+		ConnectedAt:  lc.state.ConnectedAt,
+		SystemWide:   lc.cfg.SystemWide,
+		Profile:      activeProfile(lc),
+		Subscription: lc.subscriptionName,
 	}
 	if lc.cfg.SystemWide {
 		if state, _ := sysmode.Status(context.Background()); state == sysmode.StateActive {
@@ -208,7 +217,7 @@ func cmdUpdate(ctx context.Context) error {
 	if err := ensureFreshCache(ctx, lc, true); err != nil {
 		return err
 	}
-	fmt.Printf("cached %d servers from %s\n", len(lc.cache.Servers), lc.cfg.SubscriptionURL)
+	fmt.Printf("cached %d servers from %q\n", len(lc.cache.Servers), lc.subscriptionName)
 	return nil
 }
 
@@ -408,11 +417,10 @@ func cmdMenu(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := ensureFreshCache(ctx, lc, false); err != nil {
-		return err
-	}
-	if len(lc.cache.Servers) == 0 {
-		return errNoServers
+	if lc.subscriptionName != "" {
+		if err := ensureFreshCache(ctx, lc, false); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: %v\n", err)
+		}
 	}
 
 	var lines strings.Builder
@@ -424,11 +432,12 @@ func cmdMenu(ctx context.Context) error {
 	// "this opens another menu", and is also how parseMenuChoice routes
 	// the selection to cmdMenuProfiles.
 	fmt.Fprintf(&lines, "%s%sProfile: %s%s→\n", profileMenuMarker, menuSep, activeProfile(lc), menuSep)
+	fmt.Fprintf(&lines, "%s%sSubscription: %s%s→\n", subscriptionMenuMarker, menuSep, lc.subscriptionName, menuSep)
 	currentIdx := -1
 	for i, s := range lc.cache.Servers {
 		if s.Name == currentName {
 			// +1 because the pivot row is line 0.
-			currentIdx = i + 1
+			currentIdx = i + 2
 			break
 		}
 	}
@@ -454,6 +463,9 @@ func cmdMenu(ctx context.Context) error {
 	choice, err := runWalker(ctx, lines.String(), "Pick a server", currentIdx)
 	if err != nil || choice == "" {
 		return err
+	}
+	if strings.HasPrefix(choice, subscriptionMenuMarker) {
+		return spawnDetached("menu-subscriptions")
 	}
 	if strings.HasPrefix(choice, profileMenuMarker) {
 		// Fork a fresh `xray-waybar-ctl menu-profiles` instead of

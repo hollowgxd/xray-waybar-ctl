@@ -82,7 +82,8 @@ type ConnectedOptions struct {
 	// Profile is the active routing profile (proxy-all/smart/...). Shown
 	// in the tooltip so the user can tell at a glance whether RU traffic
 	// is being short-circuited.
-	Profile string
+	Profile      string
+	Subscription string
 }
 
 // Connected renders the running state. The text is a short tag —
@@ -115,6 +116,9 @@ func Connected(s server.Server, opt ConnectedOptions) Status {
 		}
 	} else {
 		b.WriteString("\nMode: per-app")
+	}
+	if opt.Subscription != "" {
+		fmt.Fprintf(&b, "\nSubscription: %s", opt.Subscription)
 	}
 	if opt.Profile != "" {
 		fmt.Fprintf(&b, "\nProfile: %s", opt.Profile)

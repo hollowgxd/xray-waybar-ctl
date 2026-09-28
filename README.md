@@ -6,7 +6,7 @@ CLI на Go, который управляет `xray-core` и отдаёт ст�
 
 ## Возможности
 
-- Скачивает подписку (base64 → список `vless://` / `vmess://` / `trojan://`).
+- Сохраняет несколько подписок и переключает их из CLI или меню Waybar; поддерживает Clash YAML, JSON-массив URI, обычный и base64-список `vless://` / `vmess://` / `trojan://`.
 - Парсит VLESS+REALITY, TLS, WS, gRPC.
 - Параллельно URL-тестит серверы и выбирает живой с минимальной латентностью
   (или первый из заданного `priority`).
@@ -24,7 +24,7 @@ Go требуется только для сборки CLI из исходник
 нужен только для отдельного system-wide режима.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.3/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.4/install.sh | bash
 ```
 
 Команда использует закреплённый установщик, скачивает последний стабильный релиз CLI (или собирает CLI из исходников) и кладёт его в
@@ -43,7 +43,7 @@ XTLS и прописывает путь в `app.yaml`. Если в систем�
 Если в панели уже стоит HAPP и его нужно заменить **только в списке модулей**:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.3/install.sh | bash -s -- --replace-happ
+curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.4/install.sh | bash -s -- --replace-happ
 ```
 
 Скрипты/стиль HAPP сохраняются; они просто перестают использоваться в панели.
@@ -51,17 +51,16 @@ curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.3/in
 `--no-reload` оставит работающий Waybar без перезапуска. Исходный конфиг можно
 восстановить из `*.xray-waybar-backup-*` рядом с ним.
 
-**Последний шаг — URL подписки.** На первой установке создаётся приватный
-`~/.config/xray-waybar/app.yaml` с пустым `subscription_url` и очевидным
-статусом ошибки в Waybar. Вставь свой URL в этот файл, затем:
+**Последний шаг — добавить подписку.** На первой установке открой меню по правому клику в Waybar → **Subscriptions → Add subscription URL**, вставь URL. Либо в терминале:
 
 ```sh
-~/.local/bin/xray-waybar-ctl update
+~/.local/bin/xray-waybar-ctl subscription add home
 ~/.local/bin/xray-waybar-ctl connect
 ```
 
-URL и токен не передаются в командной строке установщика и не попадают в
-README/логи. По умолчанию запускается локальный SOCKS5 `127.0.0.1:1080`:
+CLI попросит URL через stdin, не помещая его в историю команд. Старое поле `subscription_url` в `app.yaml` автоматически появляется как подписка `default`; вручную переносить его не нужно. URL хранится в приватном `~/.config/xray-waybar/subscriptions.json`; для каждой подписки создаётся свой кэш. При пустом ответе или неподдерживаемом формате старое рабочее содержимое кэша сохраняется, а сообщение об ошибке объясняет причину без вывода URL или токена.
+
+По умолчанию запускается локальный SOCKS5 `127.0.0.1:1080`:
 **другие приложения не начнут пользоваться VPN автоматически**. Для всего
 трафика см. [System-wide режим](#system-wide-режим-весь-трафик-через-vpn).
 
@@ -70,7 +69,7 @@ README/логи. По умолчанию запускается локальны
 | Действие | Результат |
 | --- | --- |
 | Левый клик | Подключить / отключить |
-| Правый клик | Меню серверов и профилей (`walker`, `wofi` или `rofi`) |
+| Правый клик | Меню серверов, подписок и профилей (`walker`, `wofi` или `rofi`) |
 | Средний клик | Переподключить |
 | Колесо вверх / вниз | Следующий / предыдущий сервер |
 | Наведение | Сервер, endpoint, задержка, режим и время работы |
@@ -85,8 +84,8 @@ README/логи. По умолчанию запускается локальны
 `make install` собирает CLI и пример конфига, **но не меняет Waybar**.
 Если нужен полностью ручной контроль, используй его и пример ниже. Для
 нестандартной конфигурации скопируй шаблон из
-`~/.local/share/xray-waybar/app.yaml.example` и настрой поля. Минимально
-требуется `subscription_url`; `routing_profile: proxy-all` работает без
+`~/.local/share/xray-waybar/app.yaml.example` и настрой поля. Подписку можно добавить командой `subscription add`; поле `subscription_url`
+необязательно и оставлено для совместимости. `routing_profile: proxy-all` работает без
 geoip/geosite. Для `smart`/`whitelist` запусти `xray-waybar-ctl update-geo`.
 
 Для `systemd`-мониторинга/автореконнекта есть отдельный
@@ -107,7 +106,13 @@ VPN нет.
 ## Использование
 
 ```sh
-xray-waybar-ctl update      # подтянуть подписку в локальный кэш
+xray-waybar-ctl subscription add home  # вставить первый URL
+xray-waybar-ctl subscription add work  # добавить второй URL
+xray-waybar-ctl subscription list      # имена и количество серверов, без URL
+xray-waybar-ctl subscription use work  # выбрать и переподключить, если VPN запущен
+xray-waybar-ctl subscription update work  # обновить конкретную подписку
+xray-waybar-ctl subscription remove work  # удалить ненужную подписку и её кэш
+xray-waybar-ctl update      # обновить активную подписку
 xray-waybar-ctl list        # посмотреть, что в кэше
 xray-waybar-ctl test        # таблица латентностей
 xray-waybar-ctl connect     # тест + автоматический выбор + запуск
@@ -202,7 +207,8 @@ journalctl --user -u xray-waybar-watchdog.service -f
 ## Меню переключения
 
 Команда `xray-waybar-ctl menu` поднимает dmenu-совместимый лаунчер со списком
-серверов; первой строкой — текущий профиль. Выбор сервера → `use`,
+серверов; первые две строки — текущий профиль и активная подписка. Выбор сервера → `use`,
+выбор `Subscription: …` → второй экран с выбором или добавлением URL,
 выбор `Profile: …` → второй экран меню с вариантами `routing_profile`
 (proxy-all / direct / smart / whitelist / custom URL). Запись идёт в
 `state.json` и перебивает значение из `app.yaml` до

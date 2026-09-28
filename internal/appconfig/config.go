@@ -33,11 +33,12 @@ type Config struct {
 	XrayPort    int    `yaml:"xray_port"`
 	XrayAPIPort int    `yaml:"xray_api_port"`
 
-	PIDFile   string `yaml:"pid_file"`
-	LogFile   string `yaml:"log_file"`
-	CacheFile string `yaml:"cache_file"`
-	StateFile string `yaml:"state_file"`
-	HWIDFile  string `yaml:"hwid_file"`
+	PIDFile           string `yaml:"pid_file"`
+	LogFile           string `yaml:"log_file"`
+	CacheFile         string `yaml:"cache_file"`
+	SubscriptionsFile string `yaml:"subscriptions_file"`
+	StateFile         string `yaml:"state_file"`
+	HWIDFile          string `yaml:"hwid_file"`
 
 	// SystemWide enables the TUN sidecar (hev-socks5-tunnel via the
 	// xray-waybar-tun.service systemd unit). When true, `connect` will
@@ -187,6 +188,7 @@ func defaults() *Config {
 		PIDFile:                 "/tmp/xray-waybar.pid",
 		LogFile:                 "~/.local/share/xray-waybar/xray.log",
 		CacheFile:               "~/.cache/xray-waybar/servers.json",
+		SubscriptionsFile:       "~/.config/xray-waybar/subscriptions.json",
 		StateFile:               "~/.cache/xray-waybar/state.json",
 		HWIDFile:                "~/.local/share/xray-waybar/hwid",
 		RoutingProfile:          "proxy-all",
@@ -203,16 +205,13 @@ func defaults() *Config {
 }
 
 func (c *Config) normalize() error {
-	if c.SubscriptionURL == "" {
-		return errors.New("appconfig: subscription_url is required")
-	}
 	if c.SubscriptionIntervalSec < 0 {
 		return errors.New("appconfig: subscription_update_interval must be >= 0")
 	}
 	c.SubscriptionUpdateInterval = time.Duration(c.SubscriptionIntervalSec) * time.Second
 
 	var err error
-	for _, p := range []*string{&c.XrayConfig, &c.PIDFile, &c.LogFile, &c.CacheFile, &c.StateFile, &c.HWIDFile, &c.XrayBin, &c.Geo.Dir} {
+	for _, p := range []*string{&c.XrayConfig, &c.PIDFile, &c.LogFile, &c.CacheFile, &c.SubscriptionsFile, &c.StateFile, &c.HWIDFile, &c.XrayBin, &c.Geo.Dir} {
 		*p, err = expand(*p)
 		if err != nil {
 			return err

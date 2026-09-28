@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.3/install.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/hollowgxd/xray-waybar-ctl/v0.1.4/install.sh | bash
 set -euo pipefail
 
 REPO="hollowgxd/xray-waybar-ctl"
@@ -140,7 +140,7 @@ if ! command -v walker >/dev/null 2>&1 && ! command -v wofi >/dev/null 2>&1 && !
   echo 'Install walker, wofi or rofi for the right-click server menu.'
 fi
 if grep -Eq '^subscription_url:[[:space:]]*(""|https://example\.com|"https://example\.com)' "$CONFIG_FILE"; then
-  echo "Next: edit $CONFIG_FILE and set subscription_url, then run: $TARGET_BIN update"
+  echo "Next: $TARGET_BIN subscription add NAME (paste your URL), then: $TARGET_BIN connect"
 else
   echo "Ready: $TARGET_BIN status"
 fi

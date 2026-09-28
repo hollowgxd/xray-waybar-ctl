@@ -1,7 +1,8 @@
 # xray-waybar-ctl — пример конфигурации.
-# Скопируй в ~/.config/xray-waybar/app.yaml и подставь свой subscription_url.
+# Скопируй в ~/.config/xray-waybar/app.yaml. Подписку добавь командой
+# xray-waybar-ctl subscription add NAME; поле ниже оставлено для совместимости.
 
-subscription_url: "https://example.com/s/your-token"
+subscription_url: ""
 subscription_update_interval: 3600   # секунды; через сколько считать кэш устаревшим
 
 test_url: "http://www.gstatic.com/generate_204"
